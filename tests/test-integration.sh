@@ -42,14 +42,21 @@ else
   fail "Status command fails"
 fi
 
-# Test 3: Install in dry-run mode
+# Test 3: Simple wizard dry-run completes non-interactively
+if printf '\n\n\n\n\n\n' | "$REPO_ROOT/mac-maid" --simple --dry-run >/dev/null 2>&1; then
+  pass "Simple wizard dry-run succeeds"
+else
+  fail "Simple wizard dry-run fails"
+fi
+
+# Test 4: Install in dry-run mode
 if "$REPO_ROOT/mac-maid" --install --dry-run >/dev/null 2>&1; then
   pass "Install dry-run succeeds"
 else
   fail "Install dry-run fails"
 fi
 
-# Test 4: Create and validate a test config
+# Test 5: Create and validate a test config
 TEST_CONFIG="$TEST_DIR/test-config"
 cat > "$TEST_CONFIG" <<EOF
 # Test config
@@ -89,14 +96,14 @@ else
   fail "Test config has syntax errors"
 fi
 
-# Test 5: Run with test config in dry-run mode
+# Test 6: Run with test config in dry-run mode
 if "$REPO_ROOT/mac-maid" --run --config "$TEST_CONFIG" --dry-run 2>&1 | grep -q "Dry-run"; then
   pass "Dry-run with config succeeds"
 else
   fail "Dry-run with config fails"
 fi
 
-# Test 6: Verify dry-run creates no files
+# Test 7: Verify dry-run creates no files
 BEFORE_COUNT=$(find "$TEST_DIR" -type f | wc -l)
 "$REPO_ROOT/mac-maid" --run --config "$TEST_CONFIG" --dry-run >/dev/null 2>&1 || true
 AFTER_COUNT=$(find "$TEST_DIR" -type f | wc -l)
@@ -107,7 +114,7 @@ else
   fail "Dry-run created files (before: $BEFORE_COUNT, after: $AFTER_COUNT)"
 fi
 
-# Test 7: Schedule dry-run doesn't create LaunchAgent
+# Test 8: Schedule dry-run doesn't create LaunchAgent
 LA_PLIST="$HOME/Library/LaunchAgents/com.macmaid.clean.plist"
 LA_EXISTS_BEFORE=0
 [[ -f "$LA_PLIST" ]] && LA_EXISTS_BEFORE=1
@@ -123,28 +130,28 @@ else
   fail "Schedule dry-run modified LaunchAgent"
 fi
 
-# Test 8: Verify install.sh exists and is executable
+# Test 9: Verify install.sh exists and is executable
 if [[ -x "$REPO_ROOT/install.sh" ]]; then
   pass "install.sh exists and is executable"
 else
   fail "install.sh missing or not executable"
 fi
 
-# Test 9: Verify uninstall.sh exists and is executable
+# Test 10: Verify uninstall.sh exists and is executable
 if [[ -x "$REPO_ROOT/uninstall.sh" ]]; then
   pass "uninstall.sh exists and is executable"
 else
   fail "uninstall.sh missing or not executable"
 fi
 
-# Test 10: README exists
+# Test 11: README exists
 if [[ -f "$REPO_ROOT/README.md" ]]; then
   pass "README.md exists"
 else
   fail "README.md missing"
 fi
 
-# Test 11: Test config with all cleanup options enabled
+# Test 12: Test config with all cleanup options enabled
 TEST_CONFIG_ALL="$TEST_DIR/test-config-all"
 cat > "$TEST_CONFIG_ALL" <<EOF
 LOG_DIR="$TEST_DIR/logs"
@@ -196,14 +203,14 @@ else
   fail "Dry-run deleted test files"
 fi
 
-# Test 12: Verify script is executable
+# Test 13: Verify script is executable
 if [[ -x "$REPO_ROOT/mac-maid" ]]; then
   pass "mac-maid script is executable"
 else
   fail "mac-maid script not executable"
 fi
 
-# Test 13: Test that invalid config fails appropriately
+# Test 14: Test that invalid config fails appropriately
 INVALID_CONFIG="$TEST_DIR/invalid-config"
 echo "INVALID SYNTAX HERE ===" > "$INVALID_CONFIG"
 

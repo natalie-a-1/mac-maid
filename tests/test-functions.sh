@@ -106,6 +106,25 @@ for func in "${tui_functions[@]}"; do
   fi
 done
 
+# Test 7b: sleep_brief helper exists and is used by TUI/spinner
+if grep -q "sleep_brief()" "$REPO_ROOT/mac-maid"; then
+  pass "sleep_brief() function exists"
+else
+  fail "sleep_brief() function not found"
+fi
+
+if grep -q "tui_clear()" "$REPO_ROOT/mac-maid" && grep -q "sleep_brief 0.01" "$REPO_ROOT/mac-maid"; then
+  pass "tui_clear uses sleep_brief"
+else
+  fail "tui_clear does not use sleep_brief"
+fi
+
+if grep -q "spin_capture()" "$REPO_ROOT/mac-maid" && grep -q "sleep_brief 0.10" "$REPO_ROOT/mac-maid"; then
+  pass "spin_capture uses sleep_brief"
+else
+  fail "spin_capture does not use sleep_brief"
+fi
+
 # Test 8: LaunchAgent functions exist
 la_functions=("install_launchagent" "remove_launchagent" "launchagent_interval_xml")
 for func in "${la_functions[@]}"; do

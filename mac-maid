@@ -15,6 +15,7 @@ MODE="wizard"
 DRY_RUN=0
 YES=0
 PURGE=0
+SIMPLE=0
 
 STATE_DIR="${HOME}/.local/state/mac-maid"
 LOG_DIR_DEFAULT="${STATE_DIR}/logs"
@@ -587,9 +588,83 @@ apply_pmset_wake() {
 TUI_OK=0
 if [[ -t 0 && -t 1 ]]; then TUI_OK=1; fi
 
-tui_hide_cursor() { tput civis 2>/dev/null || true; }
-tui_show_cursor() { tput cnorm 2>/dev/null || true; }
-tui_clear() { printf "\033[2J\033[H"; }
+sleep_brief() {
+  local d="${1:-0}"
+  sleep "$d" 2>/dev/null || sleep 0 2>/dev/null || true
+}
+
+simple_prompt_choice() {
+  # Args: prompt, default_index, options...
+  local prompt="$1"; shift
+  local default_idx="$1"; shift
+  local -a opts=("$@")
+  local idx=1
+
+  while :; do
+    echo "$prompt" >&2
+    for i in "${!opts[@]}"; do
+      local n=$((i + 1))
+      if [[ "$i" -eq "$default_idx" ]]; then
+        echo "  $n) ${opts[$i]} (default)" >&2
+      else
+        echo "  $n) ${opts[$i]}" >&2
+      fi
+    done
+    local ans
+    read -r -p "Choice [$((default_idx + 1))]: " ans
+    if [[ -z "$ans" ]]; then
+      echo "$default_idx"
+      return 0
+    fi
+    if [[ "$ans" =~ ^[0-9]+$ ]] && (( ans>=1 && ans<=${#opts[@]} )); then
+      idx=$((ans - 1))
+      echo "$idx"
+      return 0
+    fi
+    warn "Invalid choice. Enter 1-${#opts[@]}."
+  done
+}
+
+simple_prompt_multi() {
+  # Args: prompt, default_indices, options...
+  # Output: space-separated selected indices
+  local prompt="$1"; shift
+  local defaults="$1"; shift
+  local -a opts=("$@")
+  local IFS=$' \n\t'
+  echo "$prompt" >&2
+  for i in "${!opts[@]}"; do
+    local n=$((i + 1))
+    echo "  $n) ${opts[$i]}" >&2
+  done
+  if [[ -n "$defaults" ]]; then
+    echo "Defaults: $(for d in $defaults; do printf '%s ' "$((d + 1))"; done)" >&2
+    echo "Enter numbers separated by spaces, or press Enter to keep defaults." >&2
+  else
+    echo "Enter numbers separated by spaces, or press Enter for none." >&2
+  fi
+  local ans
+  read -r -p "Selection: " ans
+  if [[ -z "$ans" ]]; then
+    echo "$defaults"
+    return 0
+  fi
+  local out=()
+  for token in $ans; do
+    if [[ "$token" =~ ^[0-9]+$ ]] && (( token>=1 && token<=${#opts[@]} )); then
+      out+=("$((token - 1))")
+    fi
+  done
+  printf "%s" "${out[*]}"
+}
+
+tui_hide_cursor() { printf "\033[?25l"; }
+tui_show_cursor() { printf "\033[?25h"; }
+tui_clear() {
+  # Clear screen: erase display + move cursor home + brief delay for Ghostty
+  printf "\033[2J\033[1;1H"
+  sleep_brief 0.01
+}
 
 tui_read_key() {
   # returns key in global KEY
@@ -725,7 +800,7 @@ spin_capture() {
     while kill -0 "$pid" 2>/dev/null; do
       i=$(( (i + 1) % 4 ))
       printf "\b%s" "${spin:$i:1}" >&2
-      sleep 0.10
+      sleep_brief 0.10
     done
     wait "$pid" >/dev/null 2>&1 || true
     printf "\b${G}✓${RESET}\n" >&2
@@ -819,9 +894,14 @@ valid_time_hhmm() {
 wizard_schedule() {
   # Choose schedule mode
   local idx
-  idx="$(tui_menu_single "mac-maid — Schedule" "Choose auto-run frequency:" 0 \
-        "No schedule (run manually)" "Daily" "Weekly" "Monthly")"
-  [[ "$idx" == "-1" ]] && return 1
+  if [[ "$SIMPLE" == "1" ]]; then
+    idx="$(simple_prompt_choice "Choose auto-run frequency:" 0 \
+          "No schedule (run manually)" "Daily" "Weekly" "Monthly")"
+  else
+    idx="$(tui_menu_single "mac-maid — Schedule" "Choose auto-run frequency:" 0 \
+          "No schedule (run manually)" "Daily" "Weekly" "Monthly")"
+    [[ "$idx" == "-1" ]] && return 1
+  fi
 
   case "$idx" in
     0) SCHEDULE_ENABLED=0; return 0 ;;
@@ -833,10 +913,12 @@ wizard_schedule() {
   # Time
   local t
   while :; do
-    tui_clear
-    title "mac-maid — Schedule"
-    echo "Enter run time (24-hour HH:MM)."
-    echo
+    if [[ "$SIMPLE" != "1" ]]; then
+      tui_clear
+      title "mac-maid — Schedule"
+      echo "Enter run time (24-hour HH:MM)."
+      echo
+    fi
     t="$(prompt_line "Run time" "$SCHEDULE_TIME")"
     if valid_time_hhmm "$t"; then
       SCHEDULE_TIME="$t"
@@ -848,19 +930,26 @@ wizard_schedule() {
 
   if [[ "$SCHEDULE_MODE" == "weekly" ]]; then
     local w
-    w="$(tui_menu_single "mac-maid — Schedule" "Choose weekday:" 1 \
-        "Sunday (1)" "Monday (2)" "Tuesday (3)" "Wednesday (4)" "Thursday (5)" "Friday (6)" "Saturday (7)")"
-    [[ "$w" == "-1" ]] && return 1
+    if [[ "$SIMPLE" == "1" ]]; then
+      w="$(simple_prompt_choice "Choose weekday:" 1 \
+          "Sunday (1)" "Monday (2)" "Tuesday (3)" "Wednesday (4)" "Thursday (5)" "Friday (6)" "Saturday (7)")"
+    else
+      w="$(tui_menu_single "mac-maid — Schedule" "Choose weekday:" 1 \
+          "Sunday (1)" "Monday (2)" "Tuesday (3)" "Wednesday (4)" "Thursday (5)" "Friday (6)" "Saturday (7)")"
+      [[ "$w" == "-1" ]] && return 1
+    fi
     SCHEDULE_WEEKDAY="$((w+1))"
   fi
 
   if [[ "$SCHEDULE_MODE" == "monthly" ]]; then
     local d
     while :; do
-      tui_clear
-      title "mac-maid — Schedule"
-      echo "Choose day-of-month (1..28 recommended)."
-      echo
+      if [[ "$SIMPLE" != "1" ]]; then
+        tui_clear
+        title "mac-maid — Schedule"
+        echo "Choose day-of-month (1..28 recommended)."
+        echo
+      fi
       d="$(prompt_line "Day of month" "$SCHEDULE_MONTHDAY")"
       if [[ "$d" =~ ^[0-9]+$ ]] && (( d>=1 && d<=28 )); then
         SCHEDULE_MONTHDAY="$d"
@@ -873,9 +962,14 @@ wizard_schedule() {
 
   # Optional wake schedule
   local widx
-  widx="$(tui_menu_single "mac-maid — Wake/Sleep" "Optional: wake/sleep so it can run while you're not using the Mac." 0 \
-        "No (recommended unless you really want it)" "Yes (requires admin password once; best plugged in)")"
-  [[ "$widx" == "-1" ]] && return 1
+  if [[ "$SIMPLE" == "1" ]]; then
+    widx="$(simple_prompt_choice "Optional: wake/sleep so it can run while you're not using the Mac." 0 \
+          "No (recommended unless you really want it)" "Yes (requires admin password once; best plugged in)")"
+  else
+    widx="$(tui_menu_single "mac-maid — Wake/Sleep" "Optional: wake/sleep so it can run while you're not using the Mac." 0 \
+          "No (recommended unless you really want it)" "Yes (requires admin password once; best plugged in)")"
+    [[ "$widx" == "-1" ]] && return 1
+  fi
   if [[ "$widx" == "1" ]]; then
     ALLOW_WAKE=1
     WAKE_TIME="04:58:00"
@@ -1079,7 +1173,167 @@ wizard() {
   compute_sizes
   echo
   ok "Estimates ready."
-  sleep 0.2
+  echo
+
+  # Simple, numbered flow for terminals that don't handle TUI well.
+  if [[ "$SIMPLE" == "1" ]]; then
+    local start_idx
+    start_idx="$(simple_prompt_choice "Choose what you want to do:" 0 \
+      "Run a one-time clean" "Set up auto-clean schedule" "View status" "Exit")"
+    [[ "$start_idx" == "3" ]] && return 0
+    if [[ "$start_idx" == "2" ]]; then
+      status
+      return 0
+    fi
+
+    local pref_idx
+
+    pref_idx="$(simple_prompt_choice "Notifications:" 0 \
+      "Notify when finished (recommended)" "No notifications")"
+    NOTIFY_ON_COMPLETE=$([[ "$pref_idx" == "0" ]] && echo 1 || echo 0)
+
+    local login_idx
+    login_idx="$(simple_prompt_choice "At next login:" 0 \
+      "Do nothing" "Show a short 'last run' notification")"
+    SHOW_LOGIN_SUMMARY=$([[ "$login_idx" == "1" ]] && echo 1 || echo 0)
+
+    SELECTED=(0 0 0 0 0 0 0 0 0 0 0 0)
+    SELECTED[0]=1
+    SELECTED[1]=1
+
+    local -a items=(
+      "NPM cache (≈ $(kb_to_gb "$NPM_KB") GB)"
+      "PNPM store prune (≈ $(kb_to_gb "$PNPM_KB") GB)"
+      "PIP cache (≈ $(kb_to_gb "$PIP_KB") GB)"
+      "Hugging Face cache (≈ $(kb_to_gb "$HF_KB") GB)"
+      "~/.cache (excluding Ollama + HF) (≈ $(kb_to_gb "$UC_SAFE_KB") GB)"
+      "~/Library/Caches (best-effort; may log out apps) (≈ $(kb_to_gb "$MC_KB") GB)"
+      "Homebrew cache (≈ $(kb_to_gb "$HB_KB") GB)"
+      "Xcode DerivedData (≈ $(kb_to_gb "$XD_KB") GB)"
+      "iOS Simulator data (≈ $(kb_to_gb "$SIM_KB") GB)"
+      "Empty Trash (≈ $(kb_to_gb "$TR_KB") GB)"
+      "Project junk (node_modules/.next/dist/build/...)"
+      "Python venvs (.venv/venv/.tox)"
+    )
+
+    local msg="Choose what to clean. Safe-by-default. Ollama + configs are protected."
+    local picks
+    picks="$(simple_prompt_multi "$msg" "0 1" "${items[@]}")"
+    SELECTED=(0 0 0 0 0 0 0 0 0 0 0 0)
+    local IFS=$' \n\t'
+    for idx in $picks; do
+      SELECTED[$idx]=1
+    done
+    wizard_apply_selected
+
+    if [[ "$CLEAN_PROJECT_JUNK" == "1" || "$CLEAN_VENVS" == "1" ]]; then
+      PROJECT_ROOTS="$(prompt_line "Project roots (colon-separated)" "$PROJECT_ROOTS")"
+
+      local junk_kb=0 venv_kb=0
+      if [[ "$CLEAN_PROJECT_JUNK" == "1" ]]; then
+        junk_kb="$(find_in_roots "$PROJECT_ROOTS" "${JUNK_DIR_NAMES[@]}" | sum_kb_of_paths)"
+      fi
+      if [[ "$CLEAN_VENVS" == "1" ]]; then
+        venv_kb="$(find_in_roots "$PROJECT_ROOTS" "${VENV_DIR_NAMES[@]}" | sum_kb_of_paths)"
+      fi
+
+      echo
+      title "mac-maid — Scan Preview"
+      [[ "$CLEAN_PROJECT_JUNK" == "1" ]] && echo "Project junk found: ~$(kb_to_gb "$junk_kb") GB"
+      [[ "$CLEAN_VENVS" == "1" ]] && echo "Venvs found       : ~$(kb_to_gb "$venv_kb") GB"
+      echo
+      note "This is a preview. Actual savings vary."
+      echo
+    fi
+
+    if [[ "$start_idx" == "1" ]]; then
+      if ! wizard_schedule; then
+        return 0
+      fi
+    else
+      local sidx
+      sidx="$(simple_prompt_choice "Also set up an automatic schedule?" 0 \
+        "No schedule" "Yes (daily/weekly/monthly)")"
+      if [[ "$sidx" == "1" ]]; then
+        if ! wizard_schedule; then
+          return 0
+        fi
+      else
+        SCHEDULE_ENABLED=0
+      fi
+    fi
+
+    CONF_PATH="$(prompt_line "Config path" "$CONF_PATH_DEFAULT")"
+
+    echo
+    title "mac-maid — Preview"
+    echo "${BOLD}Config preview:${RESET}"
+    echo
+    print_config | sed 's/^/  /'
+    echo
+    echo "${BOLD}Example log format:${RESET}"
+    echo
+    cat <<'LOG' | sed 's/^/  /'
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+┃ mac-maid — Run Log (example)
+┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+┃ Started : 2026-01-12 05:00:01
+┃ Host    : My-Mac
+┃ User    : you
+┃ DryRun  : 1
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+━━ Plan
+ • [dry-run] Would remove: ~/.npm/_cacache (size: 2.3G)
+ • [dry-run] Would remove: ~/Library/Developer/Xcode/DerivedData (size: 1.1G)
+
+━━ Disk
+ • Freed ~0.00 GB (approx)
+LOG
+    echo
+
+    if [[ "$DRY_RUN" == "1" ]]; then
+      warn "Dry-run: no files will be written and no scheduling changes will be made."
+      echo
+      ok "Dry-run preview complete. Re-run without --dry-run to apply changes."
+      return 0
+    fi
+
+    local aidx
+    aidx="$(simple_prompt_choice "What next?" 0 \
+      "Save config + Run now" "Save config only" "Save config + Schedule + Run now" "Cancel")"
+    [[ "$aidx" == "3" ]] && return 0
+
+    write_config
+    ok "Config saved: $CONF_PATH"
+
+    if [[ "$aidx" == "2" ]]; then
+      SCHEDULE_ENABLED=1
+      install_launchagent
+      apply_pmset_wake
+    fi
+
+    if [[ "$aidx" == "1" ]]; then
+      ok "Saved config only."
+      return 0
+    fi
+
+    safe_mkdir "$LOG_DIR"
+    log_init
+    run_cleanup
+
+    if [[ "$SCHEDULE_ENABLED" == "1" && "$aidx" != "2" ]]; then
+      install_launchagent
+      apply_pmset_wake
+    fi
+
+    ok "All done."
+    return 0
+  fi
+
+  note "Starting interactive wizard..."
+  note "Use arrow keys (↑/↓) to navigate, Enter to select, Esc to cancel."
+  sleep 1
 
   # Now start the full-screen UI.
   tui_hide_cursor
@@ -1278,6 +1532,7 @@ mac-maid ${VERSION}
 Usage:
   ./mac-maid                   Run wizard (real)
   ./mac-maid --dry-run          Wizard preview (no writes)
+  ./mac-maid --simple           Simplified prompts (no TUI)
   ./mac-maid --run --config P   Run using config (non-interactive)
   ./mac-maid --install          Install to ~/.local/bin/mac-maid
   ./mac-maid --status           Show status
@@ -1290,6 +1545,7 @@ HELP
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --dry-run) DRY_RUN=1; shift ;;
+    --simple) SIMPLE=1; shift ;;
     --yes) YES=1; shift ;;
     --config) CONF_PATH="$2"; shift 2 ;;
     --run) MODE="run"; shift ;;
@@ -1309,11 +1565,15 @@ done
 # -----------------------------------------------------------------------------
 case "$MODE" in
   wizard)
-    if [[ "$TUI_OK" == "1" ]]; then
+    if [[ "$SIMPLE" == "1" ]]; then
       wizard
     else
-      fail "Interactive mode requires a TTY. Run in Terminal."
-      exit 1
+      if [[ "$TUI_OK" == "1" ]]; then
+        wizard
+      else
+        fail "Interactive mode requires a TTY. Run in Terminal or use --simple."
+        exit 1
+      fi
     fi
     ;;
   run)
