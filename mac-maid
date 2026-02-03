@@ -212,7 +212,7 @@ clean_cache() {
   [[ -d "$HOME/.cache" ]] || return 0
   for p in "$HOME/.cache"/*; do
     [[ -e "$p" ]] || continue
-    case "${p##*/}" in ollama|huggingface) continue ;; esac
+    case "${p##*/}" in ollama|huggingface|docker|*Docker*) continue ;; esac
     safe_rm "$p"
   done
 }
@@ -223,6 +223,7 @@ clean_lib_cache() {
     [[ -e "$p" ]] || continue
     case "${p##*/}" in
       com.apple.*|CloudKit|FamilyCircle|com.google.Chrome*|com.apple.Safari) continue ;;
+      com.docker.*|Docker|*docker*|*Docker*) continue ;;  # Protect Docker
     esac
     safe_rm "$p"
   done
@@ -258,9 +259,9 @@ clean_venvs() {
 }
 
 clean_docker() {
-  have docker || return 0
-  [[ "$DRY_RUN" == "1" ]] && { dim "[dry-run] docker system prune"; return 0; }
-  docker system prune -af --volumes &>/dev/null || true
+  # Docker cleanup disabled - docker system prune can cause Docker Desktop issues
+  # Users should run 'docker system prune' manually if desired
+  dim "Docker cleanup skipped (run 'docker system prune' manually)"
 }
 
 clean_git() {
