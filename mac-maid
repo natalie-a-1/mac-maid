@@ -318,8 +318,10 @@ task_mac_caches() {
   for p in "$d"/*; do
     local base; base="$(basename "$p")"
     case "$base" in
-      com.apple.*|CloudKit|FamilyCircle) log_line "Skip protected: $p"; continue ;;
-      com.apple.Safari|com.google.Chrome|com.google.Chrome.helper*|com.openai.atlas) log_line "Skip browser/session cache: $p"; continue ;;
+      # Critical Apple services - keep these
+      CloudKit|FamilyCircle|com.apple.bird|com.apple.cloudd|com.apple.accountsd|com.apple.containermanagerd) continue ;;
+      # Browsers and sessions - keep login state
+      com.apple.Safari|com.google.Chrome|com.google.Chrome.helper*|com.openai.atlas) continue ;;
     esac
     do_rm_rf "$p"
   done
