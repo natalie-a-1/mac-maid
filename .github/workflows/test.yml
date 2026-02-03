@@ -2,9 +2,9 @@ name: Tests
 
 on:
   push:
-    branches: [ main, refinement, init ]
+    branches: [main, refinement, init]
   pull_request:
-    branches: [ main ]
+    branches: [main]
   workflow_dispatch:
 
 jobs:
@@ -65,34 +65,34 @@ jobs:
       - name: Test dry-run (no TTY)
         run: |
           echo "Testing dry-run in non-interactive mode..."
-          # Create a minimal config for testing
           mkdir -p /tmp/mac-maid-ci-test
           cat > /tmp/mac-maid-ci-test/config <<'EOF'
-LOG_DIR="/tmp/mac-maid-ci-test/logs"
-NOTIFY_ON_COMPLETE=0
-SHOW_LOGIN_SUMMARY=0
-CLEAN_NPM=1
-CLEAN_PNPM=0
-CLEAN_PIP=0
-CLEAN_HF=0
-CLEAN_USER_CACHE=0
-CLEAN_MAC_CACHES=0
-CLEAN_HOMEBREW_CACHE=0
-CLEAN_XCODE_DERIVED=0
-CLEAN_IOS_SIM=0
-CLEAN_TRASH=0
-CLEAN_PROJECT_JUNK=0
-CLEAN_VENVS=0
-PROJECT_ROOTS="/tmp"
-SCHEDULE_ENABLED=0
-SCHEDULE_MODE="daily"
-SCHEDULE_TIME="05:00"
-SCHEDULE_WEEKDAY="2"
-SCHEDULE_MONTHDAY="1"
-ALLOW_WAKE=0
-WAKE_TIME="04:58:00"
-SLEEP_TIME="05:20:00"
-EOF
+          LOG_DIR="/tmp/mac-maid-ci-test/logs"
+          NOTIFY_ON_COMPLETE=0
+          SHOW_LOGIN_SUMMARY=0
+          CLEAN_NPM=1
+          CLEAN_PNPM=0
+          CLEAN_PIP=0
+          CLEAN_HF=0
+          CLEAN_OLLAMA=0
+          CLEAN_USER_CACHE=0
+          CLEAN_MAC_CACHES=0
+          CLEAN_HOMEBREW_CACHE=0
+          CLEAN_XCODE_DERIVED=0
+          CLEAN_IOS_SIM=0
+          CLEAN_TRASH=0
+          CLEAN_PROJECT_JUNK=0
+          CLEAN_VENVS=0
+          PROJECT_ROOTS="/tmp"
+          SCHEDULE_ENABLED=0
+          SCHEDULE_MODE="daily"
+          SCHEDULE_TIME="05:00"
+          SCHEDULE_WEEKDAY="2"
+          SCHEDULE_MONTHDAY="1"
+          ALLOW_WAKE=0
+          WAKE_TIME="04:58:00"
+          SLEEP_TIME="05:20:00"
+          EOF
           ./mac-maid --run --config /tmp/mac-maid-ci-test/config --dry-run
 
       - name: Verify no files created in dry-run

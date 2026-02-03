@@ -11,9 +11,9 @@ Run all tests:
 
 Run individual test suites:
 ```bash
-./tests/test-safety.sh       # Safety and security tests (29 tests)
-./tests/test-functions.sh    # Function unit tests (42 tests)
-./tests/test-integration.sh  # Integration tests (14 tests)
+./tests/test-safety.sh       # Safety and security tests (17 tests)
+./tests/test-functions.sh    # Function unit tests (33 tests)
+./tests/test-integration.sh  # Integration tests (13 tests)
 ```
 
 ## Test Organization
@@ -131,9 +131,9 @@ When adding new functionality to mac-maid:
 ## Test Coverage
 
 Current coverage:
-- **29 safety tests** - Core protection guarantees
-- **42 function tests** - All functions accounted for
-- **14 integration tests** - Key workflows validated
-- **85 total tests**
+- **17 safety tests** - Core protection guarantees
+- **33 function tests** - All functions accounted for
+- **13 integration tests** - Key workflows validated
+- **63 total tests**
 
 All tests must pass before merging changes.

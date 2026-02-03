@@ -14,14 +14,12 @@ It cleans **rebuildable** stuff (caches + dev build junk) and can optionally sch
 
 mac-maid will **never** delete:
 
-- `~/.ollama` (Ollama models)
-- `~/.cache/ollama`
 - `~/.config` (including your terminal/app configs)
 - `~/.ssh`
 - `~/Library/Application Support`, `~/Library/Keychains`, `~/Library/Mail`, `~/Library/Messages`
 - `~/Library/Containers`
 
-Everything is opt-in. In dry-run, it’s all preview.
+`~/.ollama` is cleaned only when you select **Ollama models** in the wizard; `~/.cache/ollama` is never touched. Everything is opt-in. In dry-run, it's all preview. In dry-run, it’s all preview.
 
 ## Quick start (run from repo)
 
