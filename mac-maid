@@ -432,25 +432,35 @@ task_docker() {
 }
 
 task_git_gone() {
-  # Clean local branches whose remote is gone (merged/deleted on remote)
+  # Clean local branches whose remote is gone + prune stale worktrees
   log_line "Scan roots: $PROJECT_ROOTS"
   local IFS=":"
   for root in $PROJECT_ROOTS; do
     [[ -d "$root" ]] || continue
     while IFS= read -r repo; do
       [[ -d "$repo/.git" ]] || continue
-      log_line "Pruning gone branches in: $repo"
       (
         cd "$repo" || exit
+
+        # Prune gone branches
         git fetch --prune 2>/dev/null || true
         git branch -vv 2>/dev/null | grep ': gone]' | awk '{print $1}' | while read -r branch; do
           if [[ "$DRY_RUN" == "1" ]]; then
-            log_line "[dry-run] Would delete branch: $branch"
+            log_line "[dry-run] Would delete branch: $branch in $repo"
           else
             git branch -D "$branch" 2>/dev/null || true
-            log_line "Deleted branch: $branch"
+            log_line "Deleted branch: $branch in $repo"
           fi
         done
+
+        # Prune stale worktrees (missing directories or prunable)
+        if [[ "$DRY_RUN" == "1" ]]; then
+          local stale
+          stale="$(git worktree list --porcelain 2>/dev/null | grep -c "^worktree " || echo 0)"
+          [[ "$stale" -gt 1 ]] && log_line "[dry-run] Would prune worktrees in $repo"
+        else
+          git worktree prune 2>/dev/null || true
+        fi
       )
     done < <(find "$root" -maxdepth 3 -type d -name ".git" 2>/dev/null | sed 's/\/.git$//')
   done
@@ -1268,7 +1278,7 @@ wizard() {
       "Project junk (node_modules/.next/dist/build/...)"
       "Python venvs (.venv/venv/.tox)"
       "Docker (images, containers, volumes, build cache)"
-      "Git gone branches (prune merged/deleted remotes)"
+      "Git cleanup (gone branches + stale worktrees)"
     )
 
     local msg="Choose what to clean. Safe-by-default."
@@ -1447,7 +1457,7 @@ LOG
     "Project junk (node_modules/.next/dist/build/...)"
     "Python venvs (.venv/venv/.tox)"
     "Docker (images, containers, volumes, build cache)"
-    "Git gone branches (prune merged/deleted remotes)"
+    "Git cleanup (gone branches + stale worktrees)"
   )
 
   local msg="Toggle what to clean. Safe-by-default."
