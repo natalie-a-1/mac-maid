@@ -87,6 +87,29 @@ get_name() { echo "${TARGETS[$1]#*:}"; }
 # -----------------------------------------------------------------------------
 # Size estimation
 # -----------------------------------------------------------------------------
+
+# Calculate size of only the dirs we'll actually clean in ~/.cache
+size_cache_cleanable() {
+  local total=0 p
+  for name in pip yarn pnpm go-build typescript eslint prettier babel-loader terser-webpack-plugin; do
+    p="$HOME/.cache/$name"
+    [[ -d "$p" ]] && total=$((total + $(size_kb "$p")))
+  done
+  echo "$total"
+}
+
+# Calculate size of only the dirs we'll actually clean in ~/Library/Caches
+size_lib_cache_cleanable() {
+  local total=0 p
+  for name in com.spotify.client com.microsoft.VSCode com.microsoft.VSCode.ShipIt \
+              com.brave.Browser org.mozilla.firefox com.operasoftware.Opera \
+              Yarn typescript pip go-build; do
+    p="$HOME/Library/Caches/$name"
+    [[ -d "$p" ]] && total=$((total + $(size_kb "$p")))
+  done
+  echo "$total"
+}
+
 estimate_sizes() {
   info "Scanning..."
 
@@ -100,8 +123,8 @@ estimate_sizes() {
       pip) path="$(have python3 && python3 -m pip cache dir 2>/dev/null || echo "")" ;;
       hf) path="$HOME/.cache/huggingface" ;;
       ollama) path="$HOME/.ollama" ;;
-      cache) path="$HOME/.cache" ;;
-      lib_cache) path="$HOME/Library/Caches" ;;
+      cache) SIZES[$i]=$(size_cache_cleanable); continue ;;
+      lib_cache) SIZES[$i]=$(size_lib_cache_cleanable); continue ;;
       brew) path="$(have brew && brew --cache 2>/dev/null || echo "")" ;;
       xcode) path="$HOME/Library/Developer/Xcode/DerivedData" ;;
       ios_sim) path="$HOME/Library/Developer/CoreSimulator" ;;
@@ -172,17 +195,23 @@ tui_menu() {
 # -----------------------------------------------------------------------------
 # Cleanup functions
 # -----------------------------------------------------------------------------
+CLEAN_ERRORS=0
+
 safe_rm() {
   local p="$1"
-  [[ -z "$p" || "$p" == "/" || "$p" == "$HOME" ]] && return
+  [[ -z "$p" || "$p" == "/" || "$p" == "$HOME" ]] && return 0
   case "$p" in
-    "$HOME/.ssh"*|"$HOME/.config"*|"$HOME/.gnupg"*) return ;;
+    "$HOME/.ssh"*|"$HOME/.config"*|"$HOME/.gnupg"*) return 0 ;;
   esac
   if [[ "$DRY_RUN" == "1" ]]; then
     dim "[dry-run] Would remove: $p"
   else
-    rm -rf "$p" 2>/dev/null || true
+    if ! rm -rf "$p" 2>/dev/null; then
+      CLEAN_ERRORS=$((CLEAN_ERRORS + 1))
+      return 1
+    fi
   fi
+  return 0
 }
 
 clean_npm() {
@@ -307,12 +336,14 @@ run_cleanup() {
   before=$(df -k / | awk 'NR==2{print $4}')
   echo
 
+  local total_errors=0
   for i in "${!TARGETS[@]}"; do
     [[ "${SELECTED[$i]}" != "1" ]] && continue
     local key; key=$(get_key "$i")
     local name; name=$(get_name "$i")
 
     printf "%s→%s Cleaning %s%s%s..." "$C" "$R" "$B" "$name" "$R"
+    CLEAN_ERRORS=0
 
     case $key in
       npm) clean_npm ;;
@@ -332,7 +363,12 @@ run_cleanup() {
       git) clean_git ;;
     esac
 
-    printf "\r%s✓%s Cleaned %s%s%s   \n" "$G" "$R" "$B" "$name" "$R"
+    if [[ "$CLEAN_ERRORS" -gt 0 ]]; then
+      printf "\r%s!%s Partial %s%s%s (%d errors)\n" "$Y" "$R" "$B" "$name" "$R" "$CLEAN_ERRORS"
+      total_errors=$((total_errors + CLEAN_ERRORS))
+    else
+      printf "\r%s✓%s Cleaned %s%s%s   \n" "$G" "$R" "$B" "$name" "$R"
+    fi
   done
 
   after=$(df -k / | awk 'NR==2{print $4}')
@@ -341,7 +377,11 @@ run_cleanup() {
 
   echo
   [[ "$DRY_RUN" == "1" ]] && { warn "Dry run — no changes made"; return; }
-  ok "$(human $freed) freed — storage cleared"
+  if [[ "$total_errors" -gt 0 ]]; then
+    warn "$(human $freed) freed — $total_errors items failed (permission denied?)"
+  else
+    ok "$(human $freed) freed — storage cleared"
+  fi
 }
 
 # -----------------------------------------------------------------------------
@@ -385,7 +425,9 @@ done
 
 # Main
 main() {
-  [[ "$ALL" == "1" ]] && for i in "${!TARGETS[@]}"; do SELECTED[$i]=1; done
+  if [[ "$ALL" == "1" ]]; then
+    for i in "${!TARGETS[@]}"; do SELECTED[$i]=1; done
+  fi
 
   if [[ -t 0 && -t 1 && "$YES" != "1" ]]; then
     estimate_sizes
@@ -393,7 +435,11 @@ main() {
   fi
 
   local count=0
-  for i in "${!TARGETS[@]}"; do [[ "${SELECTED[$i]}" == "1" ]] && count=$((count + 1)); done
+  for i in "${!TARGETS[@]}"; do
+    if [[ "${SELECTED[$i]}" == "1" ]]; then
+      count=$((count + 1))
+    fi
+  done
   [[ "$count" -eq 0 ]] && { warn "Nothing selected"; exit 0; }
 
   run_cleanup
