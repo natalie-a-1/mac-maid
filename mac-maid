@@ -39,7 +39,9 @@ human() {
 # Fast size check (returns KB)
 size_kb() {
   [[ -e "$1" ]] || { echo 0; return; }
-  du -sk "$1" 2>/dev/null | cut -f1 || echo 0
+  local sz
+  sz=$(du -sk "$1" 2>/dev/null | head -1 | cut -f1)
+  [[ "$sz" =~ ^[0-9]+$ ]] && echo "$sz" || echo 0
 }
 
 # -----------------------------------------------------------------------------
@@ -245,14 +247,14 @@ clean_node_modules() {
   info "Finding node_modules..."
   find "$HOME" -maxdepth 6 -type d -name "node_modules" \
     -not -path "$HOME/Library/*" -not -path "$HOME/.Trash/*" \
-    2>/dev/null | while read -r p; do safe_rm "$p"; done
+    2>/dev/null | while read -r p; do safe_rm "$p"; done || true
 }
 
 clean_venvs() {
   info "Finding venvs..."
   find "$HOME" -maxdepth 6 -type d \( -name ".venv" -o -name "venv" -o -name ".tox" \) \
     -not -path "$HOME/Library/*" -not -path "$HOME/.Trash/*" \
-    2>/dev/null | while read -r p; do safe_rm "$p"; done
+    2>/dev/null | while read -r p; do safe_rm "$p"; done || true
 }
 
 clean_docker() {
@@ -274,10 +276,10 @@ clean_git() {
       git branch -vv 2>/dev/null | grep ': gone]' | awk '{print $1}' | while read -r branch; do
         [[ "$DRY_RUN" == "1" ]] && dim "[dry-run] delete branch $branch" && continue
         git branch -D "$branch" &>/dev/null || true
-      done
+      done || true
       git worktree prune &>/dev/null || true
     )
-  done
+  done || true
 }
 
 # -----------------------------------------------------------------------------
@@ -318,7 +320,7 @@ run_cleanup() {
 
   after=$(df -k / | awk 'NR==2{print $4}')
   freed=$(( after - before ))
-  (( freed < 0 )) && freed=0
+  [[ "$freed" -lt 0 ]] && freed=0
 
   echo
   [[ "$DRY_RUN" == "1" ]] && { warn "Dry run — no changes made"; return; }
