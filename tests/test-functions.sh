@@ -77,7 +77,7 @@ for func in "${log_functions[@]}"; do
 done
 
 # Test 5: Task functions exist for all cleanup types
-task_functions=("task_npm" "task_pnpm" "task_pip" "task_hf" "task_ollama" "task_user_cache" "task_mac_caches" "task_homebrew_cache" "task_xcode_derived" "task_ios_sim" "task_trash" "task_project_junk" "task_venvs")
+task_functions=("task_npm" "task_pnpm" "task_pip" "task_hf" "task_ollama" "task_user_cache" "task_mac_caches" "task_homebrew_cache" "task_xcode_derived" "task_ios_sim" "task_trash" "task_project_junk" "task_venvs" "task_docker" "task_git_gone")
 for func in "${task_functions[@]}"; do
   if grep -q "${func}()" "$REPO_ROOT/mac-maid"; then
     pass "Task function exists: ${func}()"

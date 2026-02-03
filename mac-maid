@@ -47,6 +47,8 @@ CLEAN_IOS_SIM=0
 CLEAN_TRASH=0
 CLEAN_PROJECT_JUNK=0
 CLEAN_VENVS=0
+CLEAN_DOCKER=0
+CLEAN_GIT_GONE=0
 
 # Colon-separated list of roots for project scanning
 PROJECT_ROOTS="${HOME}/Developer:${HOME}/Desktop:${HOME}/Documents"
@@ -420,6 +422,40 @@ task_venvs() {
   done < <(find_in_roots "$PROJECT_ROOTS" "${VENV_DIR_NAMES[@]}")
 }
 
+task_docker() {
+  # Docker can use 10-50GB+; clean unused images, containers, volumes, build cache
+  if have docker; then
+    do_cmd "docker system prune -af --volumes" docker system prune -af --volumes
+  else
+    log_line "docker not found → skip"
+  fi
+}
+
+task_git_gone() {
+  # Clean local branches whose remote is gone (merged/deleted on remote)
+  log_line "Scan roots: $PROJECT_ROOTS"
+  local IFS=":"
+  for root in $PROJECT_ROOTS; do
+    [[ -d "$root" ]] || continue
+    while IFS= read -r repo; do
+      [[ -d "$repo/.git" ]] || continue
+      log_line "Pruning gone branches in: $repo"
+      (
+        cd "$repo" || exit
+        git fetch --prune 2>/dev/null || true
+        git branch -vv 2>/dev/null | grep ': gone]' | awk '{print $1}' | while read -r branch; do
+          if [[ "$DRY_RUN" == "1" ]]; then
+            log_line "[dry-run] Would delete branch: $branch"
+          else
+            git branch -D "$branch" 2>/dev/null || true
+            log_line "Deleted branch: $branch"
+          fi
+        done
+      )
+    done < <(find "$root" -maxdepth 3 -type d -name ".git" 2>/dev/null | sed 's/\/.git$//')
+  done
+}
+
 # -----------------------------------------------------------------------------
 # Config IO
 # -----------------------------------------------------------------------------
@@ -451,6 +487,8 @@ CLEAN_IOS_SIM=${CLEAN_IOS_SIM}
 CLEAN_TRASH=${CLEAN_TRASH}
 CLEAN_PROJECT_JUNK=${CLEAN_PROJECT_JUNK}
 CLEAN_VENVS=${CLEAN_VENVS}
+CLEAN_DOCKER=${CLEAN_DOCKER}
+CLEAN_GIT_GONE=${CLEAN_GIT_GONE}
 
 PROJECT_ROOTS="${PROJECT_ROOTS}"
 
@@ -888,6 +926,8 @@ wizard_apply_selected() {
   CLEAN_TRASH="${SELECTED[10]:-0}"
   CLEAN_PROJECT_JUNK="${SELECTED[11]:-0}"
   CLEAN_VENVS="${SELECTED[12]:-0}"
+  CLEAN_DOCKER="${SELECTED[13]:-0}"
+  CLEAN_GIT_GONE="${SELECTED[14]:-0}"
 }
 
 # -----------------------------------------------------------------------------
@@ -1012,6 +1052,8 @@ run_cleanup() {
     log_kv "CLEAN_TRASH" "$CLEAN_TRASH"
     log_kv "CLEAN_PROJECT_JUNK" "$CLEAN_PROJECT_JUNK"
     log_kv "CLEAN_VENVS" "$CLEAN_VENVS"
+    log_kv "CLEAN_DOCKER" "$CLEAN_DOCKER"
+    log_kv "CLEAN_GIT_GONE" "$CLEAN_GIT_GONE"
     echo >> "$RUN_LOG"
   fi
 
@@ -1029,6 +1071,8 @@ run_cleanup() {
   [[ "$CLEAN_TRASH" == "1" ]] && { [[ "$DRY_RUN" == "0" ]] && log_section "Trash"; task_trash; }
   [[ "$CLEAN_PROJECT_JUNK" == "1" ]] && { [[ "$DRY_RUN" == "0" ]] && log_section "Project junk"; task_project_junk; }
   [[ "$CLEAN_VENVS" == "1" ]] && { [[ "$DRY_RUN" == "0" ]] && log_section "Python venvs"; task_venvs; }
+  [[ "$CLEAN_DOCKER" == "1" ]] && { [[ "$DRY_RUN" == "0" ]] && log_section "Docker"; task_docker; }
+  [[ "$CLEAN_GIT_GONE" == "1" ]] && { [[ "$DRY_RUN" == "0" ]] && log_section "Git gone branches"; task_git_gone; }
 
   after_kb="$(kb_available_root)"
   freed_kb=$(( after_kb - before_kb ))
@@ -1205,7 +1249,7 @@ wizard() {
       "Do nothing" "Show a short 'last run' notification")"
     SHOW_LOGIN_SUMMARY=$([[ "$login_idx" == "1" ]] && echo 1 || echo 0)
 
-    SELECTED=(0 0 0 0 0 0 0 0 0 0 0 0 0)
+    SELECTED=(0 0 0 0 0 0 0 0 0 0 0 0 0 0 0)
     SELECTED[0]=1
     SELECTED[1]=1
 
@@ -1223,12 +1267,14 @@ wizard() {
       "Empty Trash (≈ $(kb_to_gb "$TR_KB") GB)"
       "Project junk (node_modules/.next/dist/build/...)"
       "Python venvs (.venv/venv/.tox)"
+      "Docker (images, containers, volumes, build cache)"
+      "Git gone branches (prune merged/deleted remotes)"
     )
 
     local msg="Choose what to clean. Safe-by-default."
     local picks
     picks="$(simple_prompt_multi "$msg" "0 1" "${items[@]}")"
-    SELECTED=(0 0 0 0 0 0 0 0 0 0 0 0 0)
+    SELECTED=(0 0 0 0 0 0 0 0 0 0 0 0 0 0 0)
     local IFS=$' \n\t'
     for idx in $picks; do
       SELECTED[$idx]=1
@@ -1377,7 +1423,7 @@ LOG
   SHOW_LOGIN_SUMMARY=$([[ "$login_idx" == "1" ]] && echo 1 || echo 0)
 
   # Main checklist (condensed)
-  SELECTED=(0 0 0 0 0 0 0 0 0 0 0 0 0)
+  SELECTED=(0 0 0 0 0 0 0 0 0 0 0 0 0 0 0)
 
   # Sensible defaults:
   # - NPM + PNPM on for devs
@@ -1400,6 +1446,8 @@ LOG
     "Empty Trash (≈ $(kb_to_gb "$TR_KB") GB)"
     "Project junk (node_modules/.next/dist/build/...)"
     "Python venvs (.venv/venv/.tox)"
+    "Docker (images, containers, volumes, build cache)"
+    "Git gone branches (prune merged/deleted remotes)"
   )
 
   local msg="Toggle what to clean. Safe-by-default."
