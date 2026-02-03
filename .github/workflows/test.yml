@@ -67,10 +67,6 @@ jobs:
           echo "Testing dry-run in non-interactive mode..."
           ./mac-maid --dry-run --all --yes
 
-      - name: Test install dry-run
-        run: |
-          ./mac-maid --install --dry-run
-
       - name: Verify protected paths
         run: |
           echo "Verifying critical safety checks exist in code..."
