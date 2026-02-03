@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Unit tests for mac-maid helper functions
+# Unit tests for mac-maid v0.3.0 helper functions
 set -euo pipefail
 IFS=$'\n\t'
 
@@ -22,157 +22,29 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 echo "Testing helper functions..."
 
-# Source the main script in a subshell to test functions without side effects
-# We'll extract and test individual functions
-
-# Test 1: kb_to_gb function exists and converts correctly
-if grep -q "kb_to_gb()" "$REPO_ROOT/mac-maid"; then
-  pass "kb_to_gb function exists"
-
-  # Test the conversion logic by extracting and running it
-  kb_to_gb() {
-    local kb="$1"
-    awk -v kb="$kb" 'BEGIN{printf "%.2f", (kb/1024/1024)}'
-  }
-
-  result=$(kb_to_gb 1048576)  # 1 GB in KB
-  if [[ "$result" == "1.00" ]]; then
-    pass "kb_to_gb converts 1GB correctly: $result"
-  else
-    fail "kb_to_gb conversion wrong: expected 1.00, got $result"
-  fi
-
-  result=$(kb_to_gb 0)
-  if [[ "$result" == "0.00" ]]; then
-    pass "kb_to_gb handles zero correctly: $result"
-  else
-    fail "kb_to_gb zero handling wrong: expected 0.00, got $result"
-  fi
+# Test 1: human() function for human-readable sizes
+if grep -q "^human()" "$REPO_ROOT/mac-maid"; then
+  pass "human() function exists for size formatting"
 else
-  fail "kb_to_gb function not found"
+  fail "human() function not found"
 fi
 
-# Test 2: have function exists for command checking
-if grep -q "have()" "$REPO_ROOT/mac-maid"; then
+# Test 2: size_kb() function for fast size check
+if grep -q "^size_kb()" "$REPO_ROOT/mac-maid"; then
+  pass "size_kb() function exists"
+else
+  fail "size_kb() function not found"
+fi
+
+# Test 3: have() function for command checking
+if grep -q "^have()" "$REPO_ROOT/mac-maid"; then
   pass "have() function exists for command checking"
 else
   fail "have() function not found"
 fi
 
-# Test 3: safe_mkdir function exists
-if grep -q "safe_mkdir()" "$REPO_ROOT/mac-maid"; then
-  pass "safe_mkdir() function exists"
-else
-  fail "safe_mkdir() function not found"
-fi
-
-# Test 4: Logging functions exist
-log_functions=("log_init" "log_section" "log_line" "log_kv")
-for func in "${log_functions[@]}"; do
-  if grep -q "${func}()" "$REPO_ROOT/mac-maid"; then
-    pass "Logging function exists: ${func}()"
-  else
-    fail "Logging function not found: ${func}()"
-  fi
-done
-
-# Test 5: Task functions exist for all cleanup types
-task_functions=("task_npm" "task_pnpm" "task_pip" "task_hf" "task_ollama" "task_user_cache" "task_mac_caches" "task_homebrew_cache" "task_xcode_derived" "task_ios_sim" "task_trash" "task_project_junk" "task_venvs" "task_docker" "task_git_gone")
-for func in "${task_functions[@]}"; do
-  if grep -q "${func}()" "$REPO_ROOT/mac-maid"; then
-    pass "Task function exists: ${func}()"
-  else
-    fail "Task function not found: ${func}()"
-  fi
-done
-
-# Test 6: Config functions exist
-config_functions=("print_config" "write_config" "load_config")
-for func in "${config_functions[@]}"; do
-  if grep -q "${func}()" "$REPO_ROOT/mac-maid"; then
-    pass "Config function exists: ${func}()"
-  else
-    fail "Config function not found: ${func}()"
-  fi
-done
-
-# Test 7: TUI functions exist
-tui_functions=("tui_hide_cursor" "tui_show_cursor" "tui_clear" "tui_menu_single" "tui_menu_multi")
-for func in "${tui_functions[@]}"; do
-  if grep -q "${func}()" "$REPO_ROOT/mac-maid"; then
-    pass "TUI function exists: ${func}()"
-  else
-    fail "TUI function not found: ${func}()"
-  fi
-done
-
-# Test 7b: sleep_brief helper exists and is used by TUI/spinner
-if grep -q "sleep_brief()" "$REPO_ROOT/mac-maid"; then
-  pass "sleep_brief() function exists"
-else
-  fail "sleep_brief() function not found"
-fi
-
-if grep -q "tui_clear()" "$REPO_ROOT/mac-maid"; then
-  pass "tui_clear function is defined"
-else
-  fail "tui_clear function not found"
-fi
-
-if grep -q "spin_capture()" "$REPO_ROOT/mac-maid" && grep -q "sleep_brief 0.10" "$REPO_ROOT/mac-maid"; then
-  pass "spin_capture uses sleep_brief"
-else
-  fail "spin_capture does not use sleep_brief"
-fi
-
-# Test 8: LaunchAgent functions exist
-la_functions=("install_launchagent" "remove_launchagent" "launchagent_interval_xml")
-for func in "${la_functions[@]}"; do
-  if grep -q "${func}()" "$REPO_ROOT/mac-maid"; then
-    pass "LaunchAgent function exists: ${func}()"
-  else
-    fail "LaunchAgent function not found: ${func}()"
-  fi
-done
-
-# Test 9: valid_time_hhmm function logic
-if grep -q "valid_time_hhmm()" "$REPO_ROOT/mac-maid"; then
-  pass "valid_time_hhmm() function exists"
-
-  # Test the regex pattern
-  valid_time_hhmm() {
-    [[ "$1" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]]
-  }
-
-  if valid_time_hhmm "05:00"; then
-    pass "valid_time_hhmm accepts 05:00"
-  else
-    fail "valid_time_hhmm rejects valid time 05:00"
-  fi
-
-  if valid_time_hhmm "23:59"; then
-    pass "valid_time_hhmm accepts 23:59"
-  else
-    fail "valid_time_hhmm rejects valid time 23:59"
-  fi
-
-  if ! valid_time_hhmm "25:00"; then
-    pass "valid_time_hhmm rejects invalid time 25:00"
-  else
-    fail "valid_time_hhmm accepts invalid time 25:00"
-  fi
-
-  if ! valid_time_hhmm "12:60"; then
-    pass "valid_time_hhmm rejects invalid time 12:60"
-  else
-    fail "valid_time_hhmm accepts invalid time 12:60"
-  fi
-else
-  fail "valid_time_hhmm() function not found"
-fi
-
-# Test 10: Output helper functions exist
-output_functions=("title" "ok" "warn" "fail" "note")
+# Test 4: Output helper functions exist
+output_functions=("ok" "info" "warn" "err" "dim")
 for func in "${output_functions[@]}"; do
   if grep -q "^${func}()" "$REPO_ROOT/mac-maid"; then
     pass "Output function exists: ${func}()"
@@ -180,6 +52,99 @@ for func in "${output_functions[@]}"; do
     fail "Output function not found: ${func}()"
   fi
 done
+
+# Test 5: Target helper functions
+if grep -q "^get_key()" "$REPO_ROOT/mac-maid"; then
+  pass "get_key() function exists"
+else
+  fail "get_key() function not found"
+fi
+
+if grep -q "^get_name()" "$REPO_ROOT/mac-maid"; then
+  pass "get_name() function exists"
+else
+  fail "get_name() function not found"
+fi
+
+# Test 6: Cleanup functions exist
+clean_functions=(
+  "clean_npm"
+  "clean_pnpm"
+  "clean_pip"
+  "clean_hf"
+  "clean_ollama"
+  "clean_cache"
+  "clean_lib_cache"
+  "clean_brew"
+  "clean_xcode"
+  "clean_ios_sim"
+  "clean_trash"
+  "clean_node_modules"
+  "clean_venvs"
+  "clean_docker"
+  "clean_git"
+)
+
+for func in "${clean_functions[@]}"; do
+  if grep -q "^${func}()" "$REPO_ROOT/mac-maid"; then
+    pass "Cleanup function exists: ${func}()"
+  else
+    fail "Cleanup function not found: ${func}()"
+  fi
+done
+
+# Test 7: Core functions
+if grep -q "^tui_menu()" "$REPO_ROOT/mac-maid"; then
+  pass "tui_menu() function exists"
+else
+  fail "tui_menu() function not found"
+fi
+
+if grep -q "^estimate_sizes()" "$REPO_ROOT/mac-maid"; then
+  pass "estimate_sizes() function exists"
+else
+  fail "estimate_sizes() function not found"
+fi
+
+if grep -q "^run_cleanup()" "$REPO_ROOT/mac-maid"; then
+  pass "run_cleanup() function exists"
+else
+  fail "run_cleanup() function not found"
+fi
+
+if grep -q "^safe_rm()" "$REPO_ROOT/mac-maid"; then
+  pass "safe_rm() function exists"
+else
+  fail "safe_rm() function not found"
+fi
+
+# Test 8: TARGETS array exists with key:value format
+if grep -q 'TARGETS=(' "$REPO_ROOT/mac-maid" && grep -q '"npm:NPM cache"' "$REPO_ROOT/mac-maid"; then
+  pass "TARGETS array with key:value format exists"
+else
+  fail "TARGETS array not properly defined"
+fi
+
+# Test 9: SELECTED and SIZES arrays exist
+if grep -q 'SELECTED=()' "$REPO_ROOT/mac-maid" && grep -q 'SIZES=()' "$REPO_ROOT/mac-maid"; then
+  pass "SELECTED and SIZES arrays exist"
+else
+  fail "SELECTED or SIZES arrays not found"
+fi
+
+# Test 10: Verify usage/help function
+if grep -q "^usage()" "$REPO_ROOT/mac-maid"; then
+  pass "usage() function exists"
+else
+  fail "usage() function not found"
+fi
+
+# Test 11: main() function exists
+if grep -q "^main()" "$REPO_ROOT/mac-maid"; then
+  pass "main() function exists"
+else
+  fail "main() function not found"
+fi
 
 # Summary
 echo

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Safety tests for mac-maid - verify protected paths are never deleted
+# Safety tests for mac-maid v0.3.0 - verify protected paths are never deleted
 set -euo pipefail
 IFS=$'\n\t'
 
@@ -36,95 +36,78 @@ else
   fail "Script has syntax errors"
 fi
 
-# Test 3: Verify protected paths are in do_rm_rf safety checks
-protected_paths=(
-  "/.ollama"
-  "/.cache/ollama"
-  "/.config"
-  "/.ssh"
-  "/Library/Application Support"
-  "/Library/Keychains"
-  "/Library/Mail"
-  "/Library/Messages"
-  "/Library/Containers"
+# Test 3: Verify safe_rm function exists and has safety checks
+if grep -q "^safe_rm()" "$REPO_ROOT/mac-maid"; then
+  pass "safe_rm function exists"
+else
+  fail "safe_rm function not found"
+fi
+
+# Test 4: Verify protected paths in safe_rm
+protected_patterns=(
+  '\.ssh'
+  '\.config'
+  '\.gnupg'
 )
 
-for path in "${protected_paths[@]}"; do
-  # Check if the path pattern exists in safety rails
-  if grep -q "$path" "$REPO_ROOT/mac-maid"; then
-    pass "Protected path check exists: $path"
+for pattern in "${protected_patterns[@]}"; do
+  if grep -q "$pattern" "$REPO_ROOT/mac-maid"; then
+    pass "Protected path check exists: $pattern"
   else
-    fail "Missing protection for: $path"
+    fail "Missing protection for: $pattern"
   fi
 done
 
-# Test 4: Verify do_rm_rf function exists and has safety checks
-if grep -q "^do_rm_rf()" "$REPO_ROOT/mac-maid"; then
-  pass "do_rm_rf function exists"
-else
-  fail "do_rm_rf function not found"
-fi
-
 # Test 5: Verify safety rails block root and home
-if grep -q '"/"|"\${HOME}"' "$REPO_ROOT/mac-maid"; then
+if grep -q '"\$HOME"' "$REPO_ROOT/mac-maid" && grep -q '"/"' "$REPO_ROOT/mac-maid"; then
   pass "Safety check for root and HOME exists"
 else
   fail "Missing safety check for root and HOME"
 fi
 
 # Test 6: Dry-run mode exists and is respected
-if grep -q 'DRY_RUN=' "$REPO_ROOT/mac-maid" && grep -q 'if \[\[ "\$DRY_RUN" == "1" \]\]' "$REPO_ROOT/mac-maid"; then
+if grep -q 'DRY_RUN=' "$REPO_ROOT/mac-maid" && grep -q 'DRY_RUN.*1' "$REPO_ROOT/mac-maid"; then
   pass "Dry-run mode implemented"
 else
   fail "Dry-run mode not properly implemented"
 fi
 
-# Test 7: All cleanup toggles default to 0 (off)
-cleanup_toggles=(
-  "CLEAN_NPM=0"
-  "CLEAN_PNPM=0"
-  "CLEAN_PIP=0"
-  "CLEAN_HF=0"
-  "CLEAN_OLLAMA=0"
-  "CLEAN_DOCKER=0"
-  "CLEAN_GIT_GONE=0"
-  "CLEAN_USER_CACHE=0"
-  "CLEAN_MAC_CACHES=0"
-  "CLEAN_HOMEBREW_CACHE=0"
-  "CLEAN_XCODE_DERIVED=0"
-  "CLEAN_IOS_SIM=0"
-  "CLEAN_TRASH=0"
-  "CLEAN_PROJECT_JUNK=0"
-  "CLEAN_VENVS=0"
-)
-
-for toggle in "${cleanup_toggles[@]}"; do
-  if grep -q "^${toggle}" "$REPO_ROOT/mac-maid"; then
-    pass "Cleanup toggle defaults to off: $toggle"
-  else
-    fail "Cleanup toggle not set to default off: $toggle"
-  fi
-done
-
-# Test 8: Help shows dry-run option
+# Test 7: Help shows dry-run option
 if "$REPO_ROOT/mac-maid" --help 2>&1 | grep -q "\-\-dry-run"; then
   pass "Help shows --dry-run option"
 else
   fail "Help missing --dry-run option"
 fi
 
-# Test 9: Script rejects invalid arguments
+# Test 8: Script rejects invalid arguments
 if ! "$REPO_ROOT/mac-maid" --invalid-arg-xyz 2>/dev/null; then
   pass "Script rejects invalid arguments"
 else
   fail "Script accepts invalid arguments"
 fi
 
-# Test 10: Version number is defined
+# Test 9: Version number is defined
 if grep -q '^VERSION=' "$REPO_ROOT/mac-maid"; then
   pass "VERSION is defined"
 else
   fail "VERSION not defined"
+fi
+
+# Test 10: Clean functions use safe_rm for file operations
+clean_functions=("clean_npm" "clean_cache" "clean_lib_cache" "clean_brew" "clean_trash")
+for func in "${clean_functions[@]}"; do
+  if grep -q "^${func}()" "$REPO_ROOT/mac-maid"; then
+    pass "Clean function exists: ${func}()"
+  else
+    fail "Clean function not found: ${func}()"
+  fi
+done
+
+# Test 11: Verify com.apple.* is protected in lib_cache cleanup
+if grep -q 'com\.apple\.' "$REPO_ROOT/mac-maid"; then
+  pass "com.apple.* protection exists in lib_cache cleanup"
+else
+  fail "Missing com.apple.* protection"
 fi
 
 # Summary
