@@ -385,19 +385,22 @@ VENV_DIR_NAMES=(
   ".tox"
 )
 
-find_in_roots() {
-  local roots_str="$1"
-  shift
+find_junk() {
+  # Smart search from HOME - no user input needed
   local -a names=("$@")
-  local IFS=":"
-  for r in $roots_str; do
-    [[ -d "$r" ]] || continue
-    # For each pattern, find directories and prune
-    for n in "${names[@]}"; do
-      # Never let find errors kill the script
-      (find "$r" -type d -name "$n" -prune 2>/dev/null || true)
-    done
+  for n in "${names[@]}"; do
+    find "$HOME" -maxdepth 6 -type d -name "$n" \
+      -not -path "$HOME/Library/*" \
+      -not -path "$HOME/.Trash/*" \
+      -not -path "$HOME/.cache/*" \
+      -prune 2>/dev/null || true
   done | sort -u
+}
+
+# Legacy wrapper for compatibility
+find_in_roots() {
+  shift  # ignore roots_str, we search HOME directly
+  find_junk "$@"
 }
 
 sum_kb_of_paths() {
@@ -409,17 +412,17 @@ sum_kb_of_paths() {
 }
 
 task_project_junk() {
-  log_line "Scan roots: $PROJECT_ROOTS"
+  log_line "Scanning for project junk in $HOME (depth 6)..."
   while IFS= read -r p; do
     do_rm_rf "$p"
-  done < <(find_in_roots "$PROJECT_ROOTS" "${JUNK_DIR_NAMES[@]}")
+  done < <(find_junk "${JUNK_DIR_NAMES[@]}")
 }
 
 task_venvs() {
-  log_line "Scan roots: $PROJECT_ROOTS"
+  log_line "Scanning for venvs in $HOME (depth 6)..."
   while IFS= read -r p; do
     do_rm_rf "$p"
-  done < <(find_in_roots "$PROJECT_ROOTS" "${VENV_DIR_NAMES[@]}")
+  done < <(find_junk "${VENV_DIR_NAMES[@]}")
 }
 
 task_docker() {
@@ -433,37 +436,34 @@ task_docker() {
 
 task_git_gone() {
   # Clean local branches whose remote is gone + prune stale worktrees
-  log_line "Scan roots: $PROJECT_ROOTS"
-  local IFS=":"
-  for root in $PROJECT_ROOTS; do
-    [[ -d "$root" ]] || continue
-    while IFS= read -r repo; do
-      [[ -d "$repo/.git" ]] || continue
-      (
-        cd "$repo" || exit
+  log_line "Scanning for git repos in $HOME (depth 6)..."
+  while IFS= read -r repo; do
+    (
+      cd "$repo" || exit
 
-        # Prune gone branches
-        git fetch --prune 2>/dev/null || true
-        git branch -vv 2>/dev/null | grep ': gone]' | awk '{print $1}' | while read -r branch; do
-          if [[ "$DRY_RUN" == "1" ]]; then
-            log_line "[dry-run] Would delete branch: $branch in $repo"
-          else
-            git branch -D "$branch" 2>/dev/null || true
-            log_line "Deleted branch: $branch in $repo"
-          fi
-        done
-
-        # Prune stale worktrees (missing directories or prunable)
+      # Prune gone branches
+      git fetch --prune 2>/dev/null || true
+      git branch -vv 2>/dev/null | grep ': gone]' | awk '{print $1}' | while read -r branch; do
         if [[ "$DRY_RUN" == "1" ]]; then
-          local stale
-          stale="$(git worktree list --porcelain 2>/dev/null | grep -c "^worktree " || echo 0)"
-          [[ "$stale" -gt 1 ]] && log_line "[dry-run] Would prune worktrees in $repo"
+          log_line "[dry-run] Would delete branch: $branch in $repo"
         else
-          git worktree prune 2>/dev/null || true
+          git branch -D "$branch" 2>/dev/null || true
+          log_line "Deleted branch: $branch in $repo"
         fi
-      )
-    done < <(find "$root" -maxdepth 3 -type d -name ".git" 2>/dev/null | sed 's/\/.git$//')
-  done
+      done
+
+      # Prune stale worktrees
+      if [[ "$DRY_RUN" == "1" ]]; then
+        git worktree list --porcelain 2>/dev/null | grep -q "^worktree " && \
+          log_line "[dry-run] Would prune worktrees in $repo"
+      else
+        git worktree prune 2>/dev/null || true
+      fi
+    )
+  done < <(find "$HOME" -maxdepth 6 -type d -name ".git" \
+    -not -path "$HOME/Library/*" \
+    -not -path "$HOME/.Trash/*" \
+    2>/dev/null | sed 's/\/.git$//')
 }
 
 # -----------------------------------------------------------------------------
@@ -1291,26 +1291,6 @@ wizard() {
     done
     wizard_apply_selected
 
-    if [[ "$CLEAN_PROJECT_JUNK" == "1" || "$CLEAN_VENVS" == "1" ]]; then
-      PROJECT_ROOTS="$(prompt_line "Project roots (colon-separated)" "$PROJECT_ROOTS")"
-
-      local junk_kb=0 venv_kb=0
-      if [[ "$CLEAN_PROJECT_JUNK" == "1" ]]; then
-        junk_kb="$(find_in_roots "$PROJECT_ROOTS" "${JUNK_DIR_NAMES[@]}" | sum_kb_of_paths)"
-      fi
-      if [[ "$CLEAN_VENVS" == "1" ]]; then
-        venv_kb="$(find_in_roots "$PROJECT_ROOTS" "${VENV_DIR_NAMES[@]}" | sum_kb_of_paths)"
-      fi
-
-      echo
-      title "mac-maid — Scan Preview"
-      [[ "$CLEAN_PROJECT_JUNK" == "1" ]] && echo "Project junk found: ~$(kb_to_gb "$junk_kb") GB"
-      [[ "$CLEAN_VENVS" == "1" ]] && echo "Venvs found       : ~$(kb_to_gb "$venv_kb") GB"
-      echo
-      note "This is a preview. Actual savings vary."
-      echo
-    fi
-
     if [[ "$start_idx" == "1" ]]; then
       if ! wizard_schedule; then
         return 0
@@ -1465,32 +1445,6 @@ LOG
     return 0
   fi
   wizard_apply_selected
-
-  # If project junk or venvs enabled, ask roots once
-  if [[ "$CLEAN_PROJECT_JUNK" == "1" || "$CLEAN_VENVS" == "1" ]]; then
-    tui_show_cursor
-    PROJECT_ROOTS="$(prompt_line "Project roots (colon-separated)" "$PROJECT_ROOTS")"
-    tui_hide_cursor
-
-    # Show scan estimate
-    local junk_kb=0 venv_kb=0
-    if [[ "$CLEAN_PROJECT_JUNK" == "1" ]]; then
-      junk_kb="$(find_in_roots "$PROJECT_ROOTS" "${JUNK_DIR_NAMES[@]}" | sum_kb_of_paths)"
-    fi
-    if [[ "$CLEAN_VENVS" == "1" ]]; then
-      venv_kb="$(find_in_roots "$PROJECT_ROOTS" "${VENV_DIR_NAMES[@]}" | sum_kb_of_paths)"
-    fi
-
-    tui_clear
-    title "mac-maid — Scan Preview"
-    [[ "$CLEAN_PROJECT_JUNK" == "1" ]] && echo "Project junk found: ~$(kb_to_gb "$junk_kb") GB"
-    [[ "$CLEAN_VENVS" == "1" ]] && echo "Venvs found       : ~$(kb_to_gb "$venv_kb") GB"
-    echo
-    note "This is a preview. Actual savings vary."
-    echo
-    note "Press Enter to continue."
-    tui_read_key || true
-  fi
 
   # Scheduling decision
   if [[ "$start_idx" == "1" ]]; then
