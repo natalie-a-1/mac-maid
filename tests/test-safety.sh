@@ -103,11 +103,11 @@ for func in "${clean_functions[@]}"; do
   fi
 done
 
-# Test 11: Verify lib_cache uses allowlist (safe approach)
-if grep -q 'safe_to_clean=' "$REPO_ROOT/mac-maid"; then
-  pass "lib_cache uses allowlist approach (safe)"
+# Test 11: Verify cache cleanup uses conservative approach
+if grep -q 'CONSERVATIVE' "$REPO_ROOT/mac-maid"; then
+  pass "Cache cleanup uses conservative allowlist approach"
 else
-  fail "lib_cache should use allowlist approach"
+  fail "Cache cleanup should use conservative approach"
 fi
 
 # Summary

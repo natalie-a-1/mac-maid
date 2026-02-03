@@ -211,50 +211,36 @@ clean_ollama() { safe_rm "$HOME/.ollama"; }
 clean_cache() {
   # CONSERVATIVE: Only clean specific known-safe cache dirs
   [[ -d "$HOME/.cache" ]] || return 0
-  local safe_to_clean=(
-    "pip"
-    "yarn"
-    "pnpm"
-    "go-build"
-    "typescript"
-    "eslint"
-    "prettier"
-    "babel-loader"
-    "terser-webpack-plugin"
-  )
-  for name in "${safe_to_clean[@]}"; do
-    local p="$HOME/.cache/$name"
+  local p
+  for name in pip yarn pnpm go-build typescript eslint prettier babel-loader terser-webpack-plugin; do
+    p="$HOME/.cache/$name"
     [[ -d "$p" ]] && safe_rm "$p"
   done
+  return 0
 }
 
 clean_lib_cache() {
   # CONSERVATIVE: Only clean specific known-safe cache dirs
-  # Do NOT blindly delete everything - that breaks apps
   [[ -d "$HOME/Library/Caches" ]] || return 0
-  local safe_to_clean=(
-    "com.spotify.client"
-    "com.microsoft.VSCode"
-    "com.microsoft.VSCode.ShipIt"
-    "com.brave.Browser"
-    "org.mozilla.firefox"
-    "com.operasoftware.Opera"
-    "Yarn"
-    "typescript"
-    "pip"
-    "go-build"
-  )
-  for name in "${safe_to_clean[@]}"; do
-    local p="$HOME/Library/Caches/$name"
+  local p
+  for name in com.spotify.client com.microsoft.VSCode com.microsoft.VSCode.ShipIt \
+              com.brave.Browser org.mozilla.firefox com.operasoftware.Opera \
+              Yarn typescript pip go-build; do
+    p="$HOME/Library/Caches/$name"
     [[ -d "$p" ]] && safe_rm "$p"
   done
+  return 0
 }
 
 clean_brew() {
   have brew || return 0
-  local c; c="$(brew --cache 2>/dev/null || echo "")"
+  local c
+  c="$(brew --cache 2>/dev/null)" || return 0
   [[ -n "$c" && -d "$c" ]] || return 0
-  for p in "$c"/*; do [[ -e "$p" ]] && safe_rm "$p"; done
+  for p in "$c"/*; do
+    [[ -e "$p" ]] && safe_rm "$p"
+  done
+  return 0
 }
 
 clean_xcode() { safe_rm "$HOME/Library/Developer/Xcode/DerivedData"; }
@@ -268,7 +254,10 @@ clean_ios_sim() {
 
 clean_trash() {
   [[ -d "$HOME/.Trash" ]] || return 0
-  for p in "$HOME/.Trash"/*; do [[ -e "$p" ]] && safe_rm "$p"; done
+  for p in "$HOME/.Trash"/*; do
+    [[ -e "$p" ]] && safe_rm "$p"
+  done
+  return 0
 }
 
 clean_node_modules() {
