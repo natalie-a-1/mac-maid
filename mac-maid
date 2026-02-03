@@ -209,23 +209,44 @@ clean_hf() { safe_rm "$HOME/.cache/huggingface"; }
 clean_ollama() { safe_rm "$HOME/.ollama"; }
 
 clean_cache() {
+  # CONSERVATIVE: Only clean specific known-safe cache dirs
   [[ -d "$HOME/.cache" ]] || return 0
-  for p in "$HOME/.cache"/*; do
-    [[ -e "$p" ]] || continue
-    case "${p##*/}" in ollama|huggingface|docker|*Docker*) continue ;; esac
-    safe_rm "$p"
+  local safe_to_clean=(
+    "pip"
+    "yarn"
+    "pnpm"
+    "go-build"
+    "typescript"
+    "eslint"
+    "prettier"
+    "babel-loader"
+    "terser-webpack-plugin"
+  )
+  for name in "${safe_to_clean[@]}"; do
+    local p="$HOME/.cache/$name"
+    [[ -d "$p" ]] && safe_rm "$p"
   done
 }
 
 clean_lib_cache() {
+  # CONSERVATIVE: Only clean specific known-safe cache dirs
+  # Do NOT blindly delete everything - that breaks apps
   [[ -d "$HOME/Library/Caches" ]] || return 0
-  for p in "$HOME/Library/Caches"/*; do
-    [[ -e "$p" ]] || continue
-    case "${p##*/}" in
-      com.apple.*|CloudKit|FamilyCircle|com.google.Chrome*|com.apple.Safari) continue ;;
-      com.docker.*|Docker|*docker*|*Docker*) continue ;;  # Protect Docker
-    esac
-    safe_rm "$p"
+  local safe_to_clean=(
+    "com.spotify.client"
+    "com.microsoft.VSCode"
+    "com.microsoft.VSCode.ShipIt"
+    "com.brave.Browser"
+    "org.mozilla.firefox"
+    "com.operasoftware.Opera"
+    "Yarn"
+    "typescript"
+    "pip"
+    "go-build"
+  )
+  for name in "${safe_to_clean[@]}"; do
+    local p="$HOME/Library/Caches/$name"
+    [[ -d "$p" ]] && safe_rm "$p"
   done
 }
 
@@ -236,8 +257,14 @@ clean_brew() {
   for p in "$c"/*; do [[ -e "$p" ]] && safe_rm "$p"; done
 }
 
-clean_xcode()   { safe_rm "$HOME/Library/Developer/Xcode/DerivedData"; }
-clean_ios_sim() { safe_rm "$HOME/Library/Developer/CoreSimulator"; }
+clean_xcode() { safe_rm "$HOME/Library/Developer/Xcode/DerivedData"; }
+
+clean_ios_sim() {
+  # Only delete unavailable simulators, not all of them
+  have xcrun || return 0
+  [[ "$DRY_RUN" == "1" ]] && { dim "[dry-run] xcrun simctl delete unavailable"; return 0; }
+  xcrun simctl delete unavailable &>/dev/null || true
+}
 
 clean_trash() {
   [[ -d "$HOME/.Trash" ]] || return 0

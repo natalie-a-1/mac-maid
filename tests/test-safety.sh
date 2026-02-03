@@ -103,11 +103,11 @@ for func in "${clean_functions[@]}"; do
   fi
 done
 
-# Test 11: Verify com.apple.* is protected in lib_cache cleanup
-if grep -q 'com\.apple\.' "$REPO_ROOT/mac-maid"; then
-  pass "com.apple.* protection exists in lib_cache cleanup"
+# Test 11: Verify lib_cache uses allowlist (safe approach)
+if grep -q 'safe_to_clean=' "$REPO_ROOT/mac-maid"; then
+  pass "lib_cache uses allowlist approach (safe)"
 else
-  fail "Missing com.apple.* protection"
+  fail "lib_cache should use allowlist approach"
 fi
 
 # Summary
