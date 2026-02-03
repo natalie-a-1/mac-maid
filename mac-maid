@@ -321,8 +321,8 @@ run_cleanup() {
   (( freed < 0 )) && freed=0
 
   echo
-  [[ "$DRY_RUN" == "1" ]] && { warn "Dry run - no changes made"; return; }
-  ok "Done! Freed $(human $freed)"
+  [[ "$DRY_RUN" == "1" ]] && { warn "Dry run — no changes made"; return; }
+  ok "$(human $freed) freed — storage cleared"
 }
 
 # -----------------------------------------------------------------------------
