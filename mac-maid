@@ -38,6 +38,7 @@ CLEAN_NPM=0
 CLEAN_PNPM=0
 CLEAN_PIP=0
 CLEAN_HF=0
+CLEAN_OLLAMA=0
 CLEAN_USER_CACHE=0
 CLEAN_MAC_CACHES=0
 CLEAN_HOMEBREW_CACHE=0
@@ -189,11 +190,13 @@ do_rm_rf() {
       ;;
   esac
 
-  # Protect Ollama and config dirs explicitly
+  # Protect Ollama (unless explicitly opted-in) and config dirs
   case "$path" in
     "$HOME/.ollama"|"$HOME/.ollama/"*|"$HOME/.cache/ollama"|"$HOME/.cache/ollama/"*)
-      [[ -n "${RUN_LOG}" ]] && log_line "Skip protected: $path"
-      return 0
+      if [[ "${CLEAN_OLLAMA:-0}" != "1" ]]; then
+        [[ -n "${RUN_LOG}" ]] && log_line "Skip protected: $path"
+        return 0
+      fi
       ;;
     "$HOME/.config"|"$HOME/.config/"*|"$HOME/.ssh"|"$HOME/.ssh/"*)
       [[ -n "${RUN_LOG}" ]] && log_line "Skip protected: $path"
@@ -283,6 +286,11 @@ task_hf() {
   # HF cache is typically here; allow override via HF_HOME but keep it simple and safe
   local p="${HF_HOME:-$HOME/.cache}/huggingface"
   do_rm_rf "$p"
+}
+
+task_ollama() {
+  # Ollama models can be huge; only delete when explicitly opted-in
+  do_rm_rf "$HOME/.ollama"
 }
 
 task_user_cache() {
@@ -423,8 +431,8 @@ print_config() {
 # 0=off, 1=on
 #
 # Safety:
-# - Never deletes ~/.ollama or ~/.cache/ollama
 # - Avoids ~/.config, ~/.ssh, and major macOS support dirs
+# - Ollama models only deleted if CLEAN_OLLAMA=1
 
 LOG_DIR="${LOG_DIR}"
 NOTIFY_ON_COMPLETE=${NOTIFY_ON_COMPLETE}
@@ -434,6 +442,7 @@ CLEAN_NPM=${CLEAN_NPM}
 CLEAN_PNPM=${CLEAN_PNPM}
 CLEAN_PIP=${CLEAN_PIP}
 CLEAN_HF=${CLEAN_HF}
+CLEAN_OLLAMA=${CLEAN_OLLAMA}
 CLEAN_USER_CACHE=${CLEAN_USER_CACHE}
 CLEAN_MAC_CACHES=${CLEAN_MAC_CACHES}
 CLEAN_HOMEBREW_CACHE=${CLEAN_HOMEBREW_CACHE}
@@ -658,26 +667,18 @@ simple_prompt_multi() {
   printf "%s" "${out[*]}"
 }
 
-tui_hide_cursor() { printf "\033[?25l"; }
-tui_show_cursor() { printf "\033[?25h"; }
-tui_clear() {
-  # Clear screen: erase display + move cursor home + brief delay for Ghostty
-  printf "\033[2J\033[1;1H"
-  sleep_brief 0.01
-}
+tui_hide_cursor() { tput civis 2>/dev/null || printf '\033[?25l'; }
+tui_show_cursor() { tput cnorm 2>/dev/null || printf '\033[?25h'; }
+tui_clear() { tput clear 2>/dev/null || printf '\033[2J\033[H'; }
 
 tui_read_key() {
-  # returns key in global KEY
-  local k
+  local k k2 k3
   IFS= read -rsn1 k || true
+  KEY="$k"
   if [[ "$k" == $'\x1b' ]]; then
-    # Escape sequence
-    local k2 k3
-    IFS= read -rsn1 k2 || true
-    IFS= read -rsn1 k3 || true
+    IFS= read -rsn1 -t 1 k2 || true
+    IFS= read -rsn1 -t 1 k3 || true
     KEY="${k}${k2}${k3}"
-  else
-    KEY="$k"
   fi
 }
 
@@ -691,28 +692,30 @@ tui_menu_single() {
   local n="${#opts[@]}"
 
   while :; do
-    tui_clear
-    title "$menu_title"
-    echo "$menu_prompt"
-    echo
-    for i in "${!opts[@]}"; do
-      if [[ "$i" -eq "$idx" ]]; then
-        printf "  ${BOLD}➤ %s${RESET}\n" "${opts[$i]}"
-      else
-        printf "    %s\n" "${opts[$i]}"
-      fi
-    done
-    echo
-    note "Use ↑/↓ to move, Enter to select. (Esc to cancel)"
+    {
+      tui_clear
+      title "$menu_title"
+      echo "$menu_prompt"
+      echo
+      for i in "${!opts[@]}"; do
+        if [[ "$i" -eq "$idx" ]]; then
+          printf "  ${BOLD}➤ %s${RESET}\n" "${opts[$i]}"
+        else
+          printf "    %s\n" "${opts[$i]}"
+        fi
+      done
+      echo
+      note "Use ↑/↓ to move, Enter to select. (Esc to cancel)"
+    } >/dev/tty
 
     tui_read_key
     case "$KEY" in
-      $'\x1b[A') ((idx--)); [[ "$idx" -lt 0 ]] && idx=$((n-1)) ;;
-      $'\x1b[B') ((idx++)); [[ "$idx" -ge "$n" ]] && idx=0 ;;
+      $'\x1b[A') idx=$((idx - 1)); [[ "$idx" -lt 0 ]] && idx=$((n-1)) ;;
+      $'\x1b[B') idx=$((idx + 1)); [[ "$idx" -ge "$n" ]] && idx=0 ;;
       "") echo "$idx"; return 0 ;;           # Enter
       $'\x1b') echo "-1"; return 0 ;;        # Esc
-      "k") ((idx--)); [[ "$idx" -lt 0 ]] && idx=$((n-1)) ;;
-      "j") ((idx++)); [[ "$idx" -ge "$n" ]] && idx=0 ;;
+      "k") idx=$((idx - 1)); [[ "$idx" -lt 0 ]] && idx=$((n-1)) ;;
+      "j") idx=$((idx + 1)); [[ "$idx" -ge "$n" ]] && idx=0 ;;
     esac
   done
 }
@@ -726,31 +729,33 @@ tui_menu_multi() {
   local n="${#opts[@]}"
 
   while :; do
-    tui_clear
-    title "$menu_title"
-    echo "$menu_prompt"
-    echo
-    for i in "${!opts[@]}"; do
-      local mark="[ ]"
-      [[ "${SELECTED[$i]}" == "1" ]] && mark="[x]"
-      if [[ "$i" -eq "$idx" ]]; then
-        printf "  ${BOLD}➤ %s %s${RESET}\n" "$mark" "${opts[$i]}"
-      else
-        printf "    %s %s\n" "$mark" "${opts[$i]}"
-      fi
-    done
-    echo
-    note "↑/↓ move • Space toggle • Enter continue • Esc cancel"
+    {
+      tui_clear
+      title "$menu_title"
+      echo "$menu_prompt"
+      echo
+      for i in "${!opts[@]}"; do
+        local mark="[ ]"
+        [[ "${SELECTED[$i]}" == "1" ]] && mark="[x]"
+        if [[ "$i" -eq "$idx" ]]; then
+          printf "  ${BOLD}➤ %s %s${RESET}\n" "$mark" "${opts[$i]}"
+        else
+          printf "    %s %s\n" "$mark" "${opts[$i]}"
+        fi
+      done
+      echo
+      note "↑/↓ move • Space toggle • Enter continue • Esc cancel"
+    } >/dev/tty
 
     tui_read_key
     case "$KEY" in
-      $'\x1b[A') ((idx--)); [[ "$idx" -lt 0 ]] && idx=$((n-1)) ;;
-      $'\x1b[B') ((idx++)); [[ "$idx" -ge "$n" ]] && idx=0 ;;
+      $'\x1b[A') idx=$((idx - 1)); [[ "$idx" -lt 0 ]] && idx=$((n-1)) ;;
+      $'\x1b[B') idx=$((idx + 1)); [[ "$idx" -ge "$n" ]] && idx=0 ;;
       " ") SELECTED[$idx]=$(( 1 - ${SELECTED[$idx]:-0} )) ;;
       "") return 0 ;;
       $'\x1b') return 1 ;;
-      "k") ((idx--)); [[ "$idx" -lt 0 ]] && idx=$((n-1)) ;;
-      "j") ((idx++)); [[ "$idx" -ge "$n" ]] && idx=0 ;;
+      "k") idx=$((idx - 1)); [[ "$idx" -lt 0 ]] && idx=$((n-1)) ;;
+      "j") idx=$((idx + 1)); [[ "$idx" -ge "$n" ]] && idx=0 ;;
     esac
   done
 }
@@ -845,8 +850,8 @@ compute_sizes() {
   p="${HF_HOME:-$HOME/.cache}/huggingface"
   HF_KB="$(spin_du_kb "Estimating Hugging Face cache size…" "$p")"
 
-  p="$HOME/.cache/ollama"
-  OL_KB="$(spin_du_kb "Checking Ollama cache (protected)…" "$p")"
+  p="$HOME/.ollama"
+  OL_KB="$(spin_du_kb "Estimating Ollama models size…" "$p")"
 
   UC_TOTAL_KB="$(spin_du_kb "Estimating ~/.cache total…" "$HOME/.cache")"
   # We *never* delete Ollama + Hugging Face from ~/.cache via the generic toggle.
@@ -874,14 +879,15 @@ wizard_apply_selected() {
   CLEAN_PNPM="${SELECTED[1]:-0}"
   CLEAN_PIP="${SELECTED[2]:-0}"
   CLEAN_HF="${SELECTED[3]:-0}"
-  CLEAN_USER_CACHE="${SELECTED[4]:-0}"
-  CLEAN_MAC_CACHES="${SELECTED[5]:-0}"
-  CLEAN_HOMEBREW_CACHE="${SELECTED[6]:-0}"
-  CLEAN_XCODE_DERIVED="${SELECTED[7]:-0}"
-  CLEAN_IOS_SIM="${SELECTED[8]:-0}"
-  CLEAN_TRASH="${SELECTED[9]:-0}"
-  CLEAN_PROJECT_JUNK="${SELECTED[10]:-0}"
-  CLEAN_VENVS="${SELECTED[11]:-0}"
+  CLEAN_OLLAMA="${SELECTED[4]:-0}"
+  CLEAN_USER_CACHE="${SELECTED[5]:-0}"
+  CLEAN_MAC_CACHES="${SELECTED[6]:-0}"
+  CLEAN_HOMEBREW_CACHE="${SELECTED[7]:-0}"
+  CLEAN_XCODE_DERIVED="${SELECTED[8]:-0}"
+  CLEAN_IOS_SIM="${SELECTED[9]:-0}"
+  CLEAN_TRASH="${SELECTED[10]:-0}"
+  CLEAN_PROJECT_JUNK="${SELECTED[11]:-0}"
+  CLEAN_VENVS="${SELECTED[12]:-0}"
 }
 
 # -----------------------------------------------------------------------------
@@ -997,6 +1003,7 @@ run_cleanup() {
     log_kv "CLEAN_PNPM" "$CLEAN_PNPM"
     log_kv "CLEAN_PIP" "$CLEAN_PIP"
     log_kv "CLEAN_HF" "$CLEAN_HF"
+    log_kv "CLEAN_OLLAMA" "$CLEAN_OLLAMA"
     log_kv "CLEAN_USER_CACHE" "$CLEAN_USER_CACHE"
     log_kv "CLEAN_MAC_CACHES" "$CLEAN_MAC_CACHES"
     log_kv "CLEAN_HOMEBREW_CACHE" "$CLEAN_HOMEBREW_CACHE"
@@ -1013,6 +1020,7 @@ run_cleanup() {
   [[ "$CLEAN_PNPM" == "1" ]] && { [[ "$DRY_RUN" == "0" ]] && log_section "PNPM"; task_pnpm; }
   [[ "$CLEAN_PIP" == "1" ]] && { [[ "$DRY_RUN" == "0" ]] && log_section "PIP"; task_pip; }
   [[ "$CLEAN_HF" == "1" ]] && { [[ "$DRY_RUN" == "0" ]] && log_section "HuggingFace"; task_hf; }
+  [[ "$CLEAN_OLLAMA" == "1" ]] && { [[ "$DRY_RUN" == "0" ]] && log_section "Ollama"; task_ollama; }
   [[ "$CLEAN_USER_CACHE" == "1" ]] && { [[ "$DRY_RUN" == "0" ]] && log_section "~/.cache"; task_user_cache; }
   [[ "$CLEAN_MAC_CACHES" == "1" ]] && { [[ "$DRY_RUN" == "0" ]] && log_section "~/Library/Caches"; task_mac_caches; }
   [[ "$CLEAN_HOMEBREW_CACHE" == "1" ]] && { [[ "$DRY_RUN" == "0" ]] && log_section "Homebrew cache"; task_homebrew_cache; }
@@ -1197,7 +1205,7 @@ wizard() {
       "Do nothing" "Show a short 'last run' notification")"
     SHOW_LOGIN_SUMMARY=$([[ "$login_idx" == "1" ]] && echo 1 || echo 0)
 
-    SELECTED=(0 0 0 0 0 0 0 0 0 0 0 0)
+    SELECTED=(0 0 0 0 0 0 0 0 0 0 0 0 0)
     SELECTED[0]=1
     SELECTED[1]=1
 
@@ -1206,6 +1214,7 @@ wizard() {
       "PNPM store prune (≈ $(kb_to_gb "$PNPM_KB") GB)"
       "PIP cache (≈ $(kb_to_gb "$PIP_KB") GB)"
       "Hugging Face cache (≈ $(kb_to_gb "$HF_KB") GB)"
+      "Ollama models (≈ $(kb_to_gb "$OL_KB") GB)"
       "~/.cache (excluding Ollama + HF) (≈ $(kb_to_gb "$UC_SAFE_KB") GB)"
       "~/Library/Caches (best-effort; may log out apps) (≈ $(kb_to_gb "$MC_KB") GB)"
       "Homebrew cache (≈ $(kb_to_gb "$HB_KB") GB)"
@@ -1216,10 +1225,10 @@ wizard() {
       "Python venvs (.venv/venv/.tox)"
     )
 
-    local msg="Choose what to clean. Safe-by-default. Ollama + configs are protected."
+    local msg="Choose what to clean. Safe-by-default."
     local picks
     picks="$(simple_prompt_multi "$msg" "0 1" "${items[@]}")"
-    SELECTED=(0 0 0 0 0 0 0 0 0 0 0 0)
+    SELECTED=(0 0 0 0 0 0 0 0 0 0 0 0 0)
     local IFS=$' \n\t'
     for idx in $picks; do
       SELECTED[$idx]=1
@@ -1368,7 +1377,7 @@ LOG
   SHOW_LOGIN_SUMMARY=$([[ "$login_idx" == "1" ]] && echo 1 || echo 0)
 
   # Main checklist (condensed)
-  SELECTED=(0 0 0 0 0 0 0 0 0 0 0 0)
+  SELECTED=(0 0 0 0 0 0 0 0 0 0 0 0 0)
 
   # Sensible defaults:
   # - NPM + PNPM on for devs
@@ -1382,6 +1391,7 @@ LOG
     "PNPM store prune (≈ $(kb_to_gb "$PNPM_KB") GB)"
     "PIP cache (≈ $(kb_to_gb "$PIP_KB") GB)"
     "Hugging Face cache (≈ $(kb_to_gb "$HF_KB") GB)"
+    "Ollama models (≈ $(kb_to_gb "$OL_KB") GB)"
     "~/.cache (excluding Ollama + HF) (≈ $(kb_to_gb "$UC_SAFE_KB") GB)"
     "~/Library/Caches (best-effort; may log out apps) (≈ $(kb_to_gb "$MC_KB") GB)"
     "Homebrew cache (≈ $(kb_to_gb "$HB_KB") GB)"
@@ -1392,7 +1402,7 @@ LOG
     "Python venvs (.venv/venv/.tox)"
   )
 
-  local msg="Toggle what to clean. Safe-by-default. Ollama + configs are protected."
+  local msg="Toggle what to clean. Safe-by-default."
   if ! tui_menu_multi "mac-maid — Select Cleanup" "$msg" "${items[@]}"; then
     return 0
   fi

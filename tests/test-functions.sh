@@ -77,7 +77,7 @@ for func in "${log_functions[@]}"; do
 done
 
 # Test 5: Task functions exist for all cleanup types
-task_functions=("task_npm" "task_pnpm" "task_pip" "task_hf" "task_user_cache" "task_mac_caches" "task_homebrew_cache" "task_xcode_derived" "task_ios_sim" "task_trash" "task_project_junk" "task_venvs")
+task_functions=("task_npm" "task_pnpm" "task_pip" "task_hf" "task_ollama" "task_user_cache" "task_mac_caches" "task_homebrew_cache" "task_xcode_derived" "task_ios_sim" "task_trash" "task_project_junk" "task_venvs")
 for func in "${task_functions[@]}"; do
   if grep -q "${func}()" "$REPO_ROOT/mac-maid"; then
     pass "Task function exists: ${func}()"
@@ -113,10 +113,10 @@ else
   fail "sleep_brief() function not found"
 fi
 
-if grep -q "tui_clear()" "$REPO_ROOT/mac-maid" && grep -q "sleep_brief 0.01" "$REPO_ROOT/mac-maid"; then
-  pass "tui_clear uses sleep_brief"
+if grep -q "tui_clear()" "$REPO_ROOT/mac-maid"; then
+  pass "tui_clear function is defined"
 else
-  fail "tui_clear does not use sleep_brief"
+  fail "tui_clear function not found"
 fi
 
 if grep -q "spin_capture()" "$REPO_ROOT/mac-maid" && grep -q "sleep_brief 0.10" "$REPO_ROOT/mac-maid"; then
