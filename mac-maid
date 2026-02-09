@@ -1,0 +1,448 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# =============================================================================
+# mac-maid — fast, smart macOS cleanup
+# =============================================================================
+
+VERSION="0.3.0"
+DRY_RUN=0
+
+# Colors
+if [[ -t 1 ]]; then
+  B=$'\033[1m'; D=$'\033[2m'; R=$'\033[0m'
+  G=$'\033[32m'; Y=$'\033[33m'; C=$'\033[36m'; RED=$'\033[31m'
+else
+  B=""; D=""; R=""; G=""; Y=""; C=""; RED=""
+fi
+
+ok()   { printf "%s✓%s %s\n" "$G" "$R" "$*"; }
+info() { printf "%s→%s %s\n" "$C" "$R" "$*"; }
+warn() { printf "%s!%s %s\n" "$Y" "$R" "$*"; }
+err()  { printf "%s✗%s %s\n" "$RED" "$R" "$*" >&2; }
+dim()  { printf "%s%s%s\n" "$D" "$*" "$R"; }
+
+have() { command -v "$1" &>/dev/null; }
+
+# Human-readable sizes
+human() {
+  local kb=$1
+  if (( kb >= 1048576 )); then
+    awk "BEGIN {printf \"%.1f GB\", $kb/1048576}"
+  elif (( kb >= 1024 )); then
+    awk "BEGIN {printf \"%.0f MB\", $kb/1024}"
+  else
+    printf "%d KB" "$kb"
+  fi
+}
+
+# Fast size check (returns KB)
+size_kb() {
+  [[ -e "$1" ]] || { echo 0; return; }
+  local sz
+  sz=$(du -sk "$1" 2>/dev/null | head -1 | cut -f1)
+  [[ "$sz" =~ ^[0-9]+$ ]] && echo "$sz" || echo 0
+}
+
+# -----------------------------------------------------------------------------
+# Cleanup targets (bash 3.2 compatible - no associative arrays)
+# -----------------------------------------------------------------------------
+TARGETS=(
+  "npm:NPM cache"
+  "pnpm:PNPM store"
+  "pip:PIP cache"
+  "hf:Hugging Face models"
+  "ollama:Ollama models"
+  "cache:~/.cache"
+  "lib_cache:~/Library/Caches"
+  "brew:Homebrew cache"
+  "xcode:Xcode DerivedData"
+  "ios_sim:iOS Simulators"
+  "trash:Trash"
+  "node_modules:node_modules"
+  "venvs:Python venvs"
+  "docker:Docker"
+  "git:Git cleanup"
+)
+
+# Selection and sizes (parallel arrays)
+SELECTED=()
+SIZES=()
+for i in "${!TARGETS[@]}"; do
+  SELECTED[$i]=0
+  SIZES[$i]=0
+done
+
+# Safe defaults
+SELECTED[0]=1   # npm
+SELECTED[1]=1   # pnpm
+SELECTED[2]=1   # pip
+SELECTED[5]=1   # cache
+SELECTED[11]=1  # node_modules
+SELECTED[12]=1  # venvs
+
+get_key()  { echo "${TARGETS[$1]%%:*}"; }
+get_name() { echo "${TARGETS[$1]#*:}"; }
+
+# -----------------------------------------------------------------------------
+# Size estimation
+# -----------------------------------------------------------------------------
+
+# Calculate size of only the dirs we'll actually clean in ~/.cache
+size_cache_cleanable() {
+  local total=0 p
+  for name in pip yarn pnpm go-build typescript eslint prettier babel-loader terser-webpack-plugin; do
+    p="$HOME/.cache/$name"
+    [[ -d "$p" ]] && total=$((total + $(size_kb "$p")))
+  done
+  echo "$total"
+}
+
+# Calculate size of only the dirs we'll actually clean in ~/Library/Caches
+size_lib_cache_cleanable() {
+  local total=0 p
+  for name in com.spotify.client com.microsoft.VSCode com.microsoft.VSCode.ShipIt \
+              com.brave.Browser org.mozilla.firefox com.operasoftware.Opera \
+              Yarn typescript pip go-build; do
+    p="$HOME/Library/Caches/$name"
+    [[ -d "$p" ]] && total=$((total + $(size_kb "$p")))
+  done
+  echo "$total"
+}
+
+estimate_sizes() {
+  info "Scanning..."
+
+  for i in "${!TARGETS[@]}"; do
+    local key; key=$(get_key "$i")
+    local path=""
+
+    case $key in
+      npm) path="$HOME/.npm" ;;
+      pnpm) path="$(have pnpm && pnpm store path 2>/dev/null || echo "")" ;;
+      pip) path="$(have python3 && python3 -m pip cache dir 2>/dev/null || echo "")" ;;
+      hf) path="$HOME/.cache/huggingface" ;;
+      ollama) path="$HOME/.ollama" ;;
+      cache) SIZES[$i]=$(size_cache_cleanable); continue ;;
+      lib_cache) SIZES[$i]=$(size_lib_cache_cleanable); continue ;;
+      brew) path="$(have brew && brew --cache 2>/dev/null || echo "")" ;;
+      xcode) path="$HOME/Library/Developer/Xcode/DerivedData" ;;
+      ios_sim) path="$HOME/Library/Developer/CoreSimulator" ;;
+      trash) path="$HOME/.Trash" ;;
+      node_modules|venvs|docker|git) SIZES[$i]=0; continue ;;
+    esac
+
+    if [[ -n "$path" && -e "$path" ]]; then
+      SIZES[$i]=$(size_kb "$path")
+    fi
+  done
+}
+
+# -----------------------------------------------------------------------------
+# TUI
+# -----------------------------------------------------------------------------
+tui_menu() {
+  local idx=0 n=${#TARGETS[@]}
+
+  # Hide cursor, restore on exit
+  printf "\033[?25l" >/dev/tty
+  trap 'printf "\033[?25h" >/dev/tty' EXIT
+
+  while :; do
+    # Draw menu
+    {
+      printf "\033[H\033[J"  # Clear
+      printf "%s%smac-maid%s %sv%s%s\n" "$B" "$C" "$R" "$D" "$VERSION" "$R"
+      printf "%s────────────────────────────────────────%s\n\n" "$D" "$R"
+
+      for i in "${!TARGETS[@]}"; do
+        local name; name=$(get_name "$i")
+        local mark="[ ]"; [[ "${SELECTED[$i]}" == "1" ]] && mark="[x]"
+        local size_str=""
+        [[ "${SIZES[$i]:-0}" -gt 0 ]] && size_str=" ${D}($(human "${SIZES[$i]}"))${R}"
+
+        if [[ "$i" == "$idx" ]]; then
+          printf "  %s➤ %s %s%s%s\n" "$B" "$mark" "$name" "$R" "$size_str"
+        else
+          printf "    %s %s%s\n" "$mark" "$name" "$size_str"
+        fi
+      done
+
+      printf "\n%s↑/↓ move • Space toggle • Enter clean • a all • n none • q quit%s\n" "$D" "$R"
+    } >/dev/tty
+
+    # Read key
+    local k k2 k3
+    IFS= read -rsn1 k </dev/tty || true
+    if [[ "$k" == $'\x1b' ]]; then
+      IFS= read -rsn1 -t 1 k2 </dev/tty || true
+      IFS= read -rsn1 -t 1 k3 </dev/tty || true
+      k="${k}${k2}${k3}"
+    fi
+
+    case "$k" in
+      $'\x1b[A'|k) idx=$(( (idx - 1 + n) % n )) ;;
+      $'\x1b[B'|j) idx=$(( (idx + 1) % n )) ;;
+      " ") SELECTED[$idx]=$(( 1 - SELECTED[$idx] )) ;;
+      a) for i in "${!TARGETS[@]}"; do SELECTED[$i]=1; done ;;
+      n) for i in "${!TARGETS[@]}"; do SELECTED[$i]=0; done ;;
+      q|$'\x1b') printf "\033[?25h" >/dev/tty; exit 0 ;;
+      "") printf "\033[?25h" >/dev/tty; return 0 ;;
+    esac
+  done
+}
+
+# -----------------------------------------------------------------------------
+# Cleanup functions
+# -----------------------------------------------------------------------------
+CLEAN_ERRORS=0
+
+safe_rm() {
+  local p="$1"
+  [[ -z "$p" || "$p" == "/" || "$p" == "$HOME" ]] && return 0
+  case "$p" in
+    "$HOME/.ssh"*|"$HOME/.config"*|"$HOME/.gnupg"*) return 0 ;;
+  esac
+  if [[ "$DRY_RUN" == "1" ]]; then
+    dim "[dry-run] Would remove: $p"
+  else
+    if ! rm -rf "$p" 2>/dev/null; then
+      CLEAN_ERRORS=$((CLEAN_ERRORS + 1))
+      return 1
+    fi
+  fi
+  return 0
+}
+
+clean_npm() {
+  have npm || return 0
+  [[ "$DRY_RUN" == "1" ]] && { dim "[dry-run] npm cache clean"; return 0; }
+  npm cache clean --force &>/dev/null || true
+  safe_rm "$HOME/.npm/_cacache"
+  safe_rm "$HOME/.npm/_npx"
+}
+
+clean_pnpm() {
+  have pnpm || return 0
+  [[ "$DRY_RUN" == "1" ]] && { dim "[dry-run] pnpm store prune"; return 0; }
+  pnpm store prune &>/dev/null || true
+}
+
+clean_pip() {
+  have python3 || return 0
+  [[ "$DRY_RUN" == "1" ]] && { dim "[dry-run] pip cache purge"; return 0; }
+  python3 -m pip cache purge &>/dev/null || true
+}
+
+clean_hf() { safe_rm "$HOME/.cache/huggingface"; }
+clean_ollama() { safe_rm "$HOME/.ollama"; }
+
+clean_cache() {
+  # CONSERVATIVE: Only clean specific known-safe cache dirs
+  [[ -d "$HOME/.cache" ]] || return 0
+  local p
+  for name in pip yarn pnpm go-build typescript eslint prettier babel-loader terser-webpack-plugin; do
+    p="$HOME/.cache/$name"
+    [[ -d "$p" ]] && safe_rm "$p"
+  done
+  return 0
+}
+
+clean_lib_cache() {
+  # CONSERVATIVE: Only clean specific known-safe cache dirs
+  [[ -d "$HOME/Library/Caches" ]] || return 0
+  local p
+  for name in com.spotify.client com.microsoft.VSCode com.microsoft.VSCode.ShipIt \
+              com.brave.Browser org.mozilla.firefox com.operasoftware.Opera \
+              Yarn typescript pip go-build; do
+    p="$HOME/Library/Caches/$name"
+    [[ -d "$p" ]] && safe_rm "$p"
+  done
+  return 0
+}
+
+clean_brew() {
+  have brew || return 0
+  local c
+  c="$(brew --cache 2>/dev/null)" || return 0
+  [[ -n "$c" && -d "$c" ]] || return 0
+  for p in "$c"/*; do
+    [[ -e "$p" ]] && safe_rm "$p"
+  done
+  return 0
+}
+
+clean_xcode() { safe_rm "$HOME/Library/Developer/Xcode/DerivedData"; }
+
+clean_ios_sim() {
+  # Only delete unavailable simulators, not all of them
+  have xcrun || return 0
+  [[ "$DRY_RUN" == "1" ]] && { dim "[dry-run] xcrun simctl delete unavailable"; return 0; }
+  xcrun simctl delete unavailable &>/dev/null || true
+}
+
+clean_trash() {
+  [[ -d "$HOME/.Trash" ]] || return 0
+  for p in "$HOME/.Trash"/*; do
+    [[ -e "$p" ]] && safe_rm "$p"
+  done
+  return 0
+}
+
+clean_node_modules() {
+  info "Finding node_modules..."
+  find "$HOME" -maxdepth 6 -type d -name "node_modules" \
+    -not -path "$HOME/Library/*" -not -path "$HOME/.Trash/*" \
+    2>/dev/null | while read -r p; do safe_rm "$p"; done || true
+}
+
+clean_venvs() {
+  info "Finding venvs..."
+  find "$HOME" -maxdepth 6 -type d \( -name ".venv" -o -name "venv" -o -name ".tox" \) \
+    -not -path "$HOME/Library/*" -not -path "$HOME/.Trash/*" \
+    2>/dev/null | while read -r p; do safe_rm "$p"; done || true
+}
+
+clean_docker() {
+  # Docker cleanup disabled - docker system prune can cause Docker Desktop issues
+  # Users should run 'docker system prune' manually if desired
+  dim "Docker cleanup skipped (run 'docker system prune' manually)"
+}
+
+clean_git() {
+  info "Pruning git repos..."
+  find "$HOME" -maxdepth 6 -type d -name ".git" \
+    -not -path "$HOME/Library/*" -not -path "$HOME/.Trash/*" \
+    2>/dev/null | while read -r gitdir; do
+    local repo="${gitdir%/.git}"
+    [[ -d "$repo" ]] || continue
+    (
+      cd "$repo" 2>/dev/null || exit
+      git fetch --prune &>/dev/null || true
+      git branch -vv 2>/dev/null | grep ': gone]' | awk '{print $1}' | while read -r branch; do
+        [[ "$DRY_RUN" == "1" ]] && dim "[dry-run] delete branch $branch" && continue
+        git branch -D "$branch" &>/dev/null || true
+      done || true
+      git worktree prune &>/dev/null || true
+    )
+  done || true
+}
+
+# -----------------------------------------------------------------------------
+# Main cleanup with streaming output
+# -----------------------------------------------------------------------------
+run_cleanup() {
+  local before after freed
+  before=$(df -k / | awk 'NR==2{print $4}')
+  echo
+
+  local total_errors=0
+  for i in "${!TARGETS[@]}"; do
+    [[ "${SELECTED[$i]}" != "1" ]] && continue
+    local key; key=$(get_key "$i")
+    local name; name=$(get_name "$i")
+
+    printf "%s→%s Cleaning %s%s%s..." "$C" "$R" "$B" "$name" "$R"
+    CLEAN_ERRORS=0
+
+    case $key in
+      npm) clean_npm ;;
+      pnpm) clean_pnpm ;;
+      pip) clean_pip ;;
+      hf) clean_hf ;;
+      ollama) clean_ollama ;;
+      cache) clean_cache ;;
+      lib_cache) clean_lib_cache ;;
+      brew) clean_brew ;;
+      xcode) clean_xcode ;;
+      ios_sim) clean_ios_sim ;;
+      trash) clean_trash ;;
+      node_modules) clean_node_modules ;;
+      venvs) clean_venvs ;;
+      docker) clean_docker ;;
+      git) clean_git ;;
+    esac
+
+    if [[ "$CLEAN_ERRORS" -gt 0 ]]; then
+      printf "\r%s!%s Partial %s%s%s (%d errors)\n" "$Y" "$R" "$B" "$name" "$R" "$CLEAN_ERRORS"
+      total_errors=$((total_errors + CLEAN_ERRORS))
+    else
+      printf "\r%s✓%s Cleaned %s%s%s   \n" "$G" "$R" "$B" "$name" "$R"
+    fi
+  done
+
+  after=$(df -k / | awk 'NR==2{print $4}')
+  freed=$(( after - before ))
+  [[ "$freed" -lt 0 ]] && freed=0
+
+  echo
+  [[ "$DRY_RUN" == "1" ]] && { warn "Dry run — no changes made"; return; }
+  if [[ "$total_errors" -gt 0 ]]; then
+    warn "$(human $freed) freed — $total_errors items failed (permission denied?)"
+  else
+    ok "$(human $freed) freed — storage cleared"
+  fi
+}
+
+# -----------------------------------------------------------------------------
+# CLI
+# -----------------------------------------------------------------------------
+usage() {
+  cat <<EOF
+${B}mac-maid${R} v${VERSION} — fast, smart macOS cleanup
+
+${B}Usage:${R}
+  mac-maid              Interactive cleanup
+  mac-maid --dry-run    Preview without changes
+  mac-maid --all        Clean everything (no prompt)
+  mac-maid --status     Show disk usage
+
+${B}Options:${R}
+  -h, --help      Show this help
+  -n, --dry-run   Preview mode
+  -a, --all       Select all targets
+  -y, --yes       Skip confirmation
+EOF
+}
+
+ALL=0 YES=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    -n|--dry-run) DRY_RUN=1; shift ;;
+    -a|--all) ALL=1; shift ;;
+    -y|--yes) YES=1; shift ;;
+    --status)
+      echo
+      df -h / | awk 'NR==2{printf "Disk: %s used / %s total (%s free)\n", $3, $2, $4}'
+      echo
+      exit 0
+      ;;
+    *) err "Unknown: $1"; usage; exit 1 ;;
+  esac
+done
+
+# Main
+main() {
+  if [[ "$ALL" == "1" ]]; then
+    for i in "${!TARGETS[@]}"; do SELECTED[$i]=1; done
+  fi
+
+  if [[ -t 0 && -t 1 && "$YES" != "1" ]]; then
+    estimate_sizes
+    tui_menu
+  fi
+
+  local count=0
+  for i in "${!TARGETS[@]}"; do
+    if [[ "${SELECTED[$i]}" == "1" ]]; then
+      count=$((count + 1))
+    fi
+  done
+  [[ "$count" -eq 0 ]] && { warn "Nothing selected"; exit 0; }
+
+  run_cleanup
+}
+
+main

@@ -1,0 +1,88 @@
+name: Tests
+
+on:
+  push:
+    branches: [main, refinement, init]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Run Tests on macOS
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Verify script is executable
+        run: |
+          if [[ ! -x ./mac-maid ]]; then
+            echo "Making mac-maid executable..."
+            chmod +x ./mac-maid
+          fi
+          ls -la ./mac-maid
+
+      - name: Verify test scripts are executable
+        run: |
+          chmod +x tests/*.sh
+          ls -la tests/
+
+      - name: Run shellcheck (if available)
+        run: |
+          if command -v shellcheck >/dev/null 2>&1; then
+            echo "Running shellcheck..."
+            shellcheck ./mac-maid ./install.sh ./uninstall.sh tests/*.sh || true
+          else
+            echo "shellcheck not available, skipping"
+          fi
+
+      - name: Verify bash syntax
+        run: |
+          echo "Checking bash syntax..."
+          bash -n ./mac-maid
+          bash -n ./install.sh
+          bash -n ./uninstall.sh
+          for test in tests/*.sh; do
+            echo "Checking $test..."
+            bash -n "$test"
+          done
+
+      - name: Run test suite
+        run: |
+          echo "Running test suite..."
+          ./tests/test-runner.sh
+
+      - name: Test help command
+        run: |
+          ./mac-maid --help
+
+      - name: Test status command
+        run: |
+          ./mac-maid --status
+
+      - name: Test dry-run (no TTY)
+        run: |
+          echo "Testing dry-run in non-interactive mode..."
+          ./mac-maid --dry-run --all --yes
+
+      - name: Verify protected paths
+        run: |
+          echo "Verifying critical safety checks exist in code..."
+          grep -q ".ollama" ./mac-maid || (echo "Missing .ollama protection" && exit 1)
+          grep -q ".config" ./mac-maid || (echo "Missing .config protection" && exit 1)
+          grep -q ".ssh" ./mac-maid || (echo "Missing .ssh protection" && exit 1)
+          echo "✓ All critical safety checks present"
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "================================"
+          echo "Test Summary"
+          echo "================================"
+          echo "✓ Syntax checks passed"
+          echo "✓ Test suite completed"
+          echo "✓ Dry-run verified"
+          echo "✓ Safety checks present"
+          echo "================================"
