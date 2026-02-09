@@ -4,9 +4,12 @@ IFS=$'\n\t'
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 SCRIPT="${HERE}/mac-maid"
+if [[ ! -f "$SCRIPT" ]]; then
+  SCRIPT="${HERE}/mac-maid.sh"
+fi
 
 if [[ ! -f "$SCRIPT" ]]; then
-  echo "✗ mac-maid not found next to install.sh"
+  echo "✗ mac-maid or mac-maid.sh not found next to install.sh"
   exit 1
 fi
 
@@ -18,4 +21,3 @@ echo "Installed."
 echo "Next:"
 echo "  mac-maid --dry-run   # preview wizard safely (no changes)"
 echo "  mac-maid             # run wizard for real"
-

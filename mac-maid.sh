@@ -1,0 +1,1357 @@
+#!/usr/bin/env bash
+set -euo pipefail
+IFS=$'\n\t'
+
+# =============================================================================
+# mac-maid — safe-by-default macOS cleanup + optional scheduling (LaunchAgent)
+# =============================================================================
+
+VERSION="0.2.1"
+
+# -----------------------------------------------------------------------------
+# Defaults / paths
+# -----------------------------------------------------------------------------
+MODE="wizard"
+DRY_RUN=0
+YES=0
+PURGE=0
+
+STATE_DIR="${HOME}/.local/state/mac-maid"
+LOG_DIR_DEFAULT="${STATE_DIR}/logs"
+LOG_DIR="${LOG_DIR_DEFAULT}"
+CONF_PATH_DEFAULT="${HOME}/.config/mac-maid/config"
+CONF_PATH="${CONF_PATH_DEFAULT}"
+
+LA_LABEL="com.macmaid.clean"
+LA_PLIST="${HOME}/Library/LaunchAgents/${LA_LABEL}.plist"
+
+SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/$(basename "${BASH_SOURCE[0]}")"
+
+# -----------------------------------------------------------------------------
+# Config toggles (opt-in)
+# -----------------------------------------------------------------------------
+NOTIFY_ON_COMPLETE=1
+SHOW_LOGIN_SUMMARY=0
+
+CLEAN_NPM=0
+CLEAN_PNPM=0
+CLEAN_PIP=0
+CLEAN_HF=0
+CLEAN_USER_CACHE=0
+CLEAN_MAC_CACHES=0
+CLEAN_HOMEBREW_CACHE=0
+CLEAN_XCODE_DERIVED=0
+CLEAN_IOS_SIM=0
+CLEAN_TRASH=0
+CLEAN_PROJECT_JUNK=0
+CLEAN_VENVS=0
+
+# Colon-separated list of roots for project scanning
+PROJECT_ROOTS="${HOME}/Developer:${HOME}/Desktop:${HOME}/Documents"
+
+# Scheduling fields
+SCHEDULE_ENABLED=0
+SCHEDULE_MODE="daily"          # daily|weekly|monthly
+SCHEDULE_TIME="05:00"          # HH:MM (24-hour)
+SCHEDULE_WEEKDAY="2"           # 1=Sun..7=Sat
+SCHEDULE_MONTHDAY="1"          # 1..28 recommended
+
+ALLOW_WAKE=0
+WAKE_TIME="04:58:00"
+SLEEP_TIME="05:20:00"
+
+RUN_LOG=""
+
+# -----------------------------------------------------------------------------
+# Pretty output helpers
+# -----------------------------------------------------------------------------
+if [[ -t 1 ]]; then
+  BOLD="$(printf '\033[1m')"
+  RESET="$(printf '\033[0m')"
+  DIM="$(printf '\033[2m')"
+  G="$(printf '\033[32m')"
+  Y="$(printf '\033[33m')"
+  R="$(printf '\033[31m')"
+  GR="$(printf '\033[36m')"
+else
+  BOLD=""; RESET=""; DIM=""; G=""; Y=""; R=""; GR=""
+fi
+
+title() {
+  echo
+  echo "${BOLD}${GR}$1${RESET}"
+  echo "${DIM}────────────────────────────────────────────────────────────${RESET}"
+}
+ok()   { echo "${G}✓${RESET} $*"; }
+warn() { echo "${Y}!${RESET} $*"; }
+fail() { echo "${R}✗${RESET} $*" >&2; }
+note() { echo "${DIM}$*${RESET}"; }
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+safe_mkdir() { mkdir -p "$1" >/dev/null 2>&1 || true; }
+
+# -----------------------------------------------------------------------------
+# Logging
+# -----------------------------------------------------------------------------
+log_init() {
+  safe_mkdir "$LOG_DIR"
+  RUN_LOG="${LOG_DIR}/run-$(date '+%Y%m%d-%H%M%S').log"
+  {
+    echo "┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "┃ mac-maid — Run Log"
+    echo "┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "┃ Started : $(date '+%Y-%m-%d %H:%M:%S')"
+    echo "┃ Host    : $(scutil --get ComputerName 2>/dev/null || hostname || echo '?')"
+    echo "┃ User    : $(whoami || echo '?')"
+    echo "┃ Version : ${VERSION}"
+    echo "┃ DryRun  : ${DRY_RUN}"
+    echo "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo
+  } > "$RUN_LOG"
+}
+
+log_section() {
+  [[ -n "${RUN_LOG}" ]] || return 0
+  {
+    echo
+    echo "━━ $*"
+  } >> "$RUN_LOG"
+}
+
+log_line() {
+  [[ -n "${RUN_LOG}" ]] || return 0
+  echo " • $*" >> "$RUN_LOG"
+}
+
+log_kv() {
+  [[ -n "${RUN_LOG}" ]] || return 0
+  printf " • %-22s %s\n" "$1" "$2" >> "$RUN_LOG"
+}
+
+notify() {
+  [[ "$NOTIFY_ON_COMPLETE" == "1" ]] || return 0
+  have osascript || return 0
+  local msg="$1"
+  osascript -e "display notification \"${msg}\" with title \"mac-maid\"" >/dev/null 2>&1 || true
+}
+
+# -----------------------------------------------------------------------------
+# Disk helpers
+# -----------------------------------------------------------------------------
+kb_available_root() {
+  df -k / | awk 'NR==2{print $4+0}' || echo 0
+}
+
+kb_to_gb() {
+  # prints with 2 decimals
+  local kb="$1"
+  awk -v kb="$kb" 'BEGIN{printf "%.2f", (kb/1024/1024)}'
+}
+
+du_kb() {
+  local p="$1"
+  [[ -e "$p" ]] || { echo 0; return 0; }
+  # du can exit non-zero on permission issues; never let that kill the script.
+  # -x avoids crossing filesystem mount points (speeds up and avoids surprises).
+  (du -sk -x "$p" 2>/dev/null || true) | awk 'NR==1{print $1+0}' || echo 0
+}
+
+du_h() {
+  local p="$1"
+  [[ -e "$p" ]] || { echo "0B"; return 0; }
+  du -sh "$p" 2>/dev/null | awk 'NR==1{print $1}' || echo "?"
+}
+
+# -----------------------------------------------------------------------------
+# Exec wrappers (dry-run aware)
+# -----------------------------------------------------------------------------
+do_cmd() {
+  local label="$1"; shift
+  if [[ "$DRY_RUN" == "1" ]]; then
+    log_line "[dry-run] Would run: $label"
+    return 0
+  fi
+  log_line "Run: $label"
+  "$@" >> "$RUN_LOG" 2>&1 || true
+}
+
+do_rm_rf() {
+  local path="$1"
+  [[ -n "$path" ]] || return 0
+
+  # Safety rails
+  case "$path" in
+    "/"|"${HOME}"|"${HOME}/"|"${HOME}/Library"|"${HOME}/Library/"*"/Containers"|"${HOME}/Library/Containers"|"${HOME}/Library/Application Support"|"${HOME}/Library/Application Support/"*|"${HOME}/Library/Keychains"|"${HOME}/Library/Keychains/"*|"${HOME}/Library/Mail"|"${HOME}/Library/Mail/"*|"${HOME}/Library/Messages"|"${HOME}/Library/Messages/"*)
+      [[ -n "${RUN_LOG}" ]] && log_line "Skip protected: $path"
+      return 0
+      ;;
+  esac
+
+  # Protect Ollama and config dirs explicitly
+  case "$path" in
+    "$HOME/.ollama"|"$HOME/.ollama/"*|"$HOME/.cache/ollama"|"$HOME/.cache/ollama/"*)
+      [[ -n "${RUN_LOG}" ]] && log_line "Skip protected: $path"
+      return 0
+      ;;
+    "$HOME/.config"|"$HOME/.config/"*|"$HOME/.ssh"|"$HOME/.ssh/"*)
+      [[ -n "${RUN_LOG}" ]] && log_line "Skip protected: $path"
+      return 0
+      ;;
+  esac
+
+  if [[ "$DRY_RUN" == "1" ]]; then
+    [[ -n "${RUN_LOG}" ]] && log_line "[dry-run] Would remove: $path (size: $(du_h "$path"))"
+    return 0
+  fi
+  [[ -n "${RUN_LOG}" ]] && log_line "Remove: $path (size: $(du_h "$path"))"
+  rm -rf "$path" >> "$RUN_LOG" 2>&1 || true
+}
+
+# -----------------------------------------------------------------------------
+# Snapshot / audit
+# -----------------------------------------------------------------------------
+audit_snapshot() {
+  title "mac-maid — Storage Snapshot"
+  df -h / | awk 'NR==1{print $0} NR==2{printf "Disk: Used %s / %s | Available %s\n", $3, $2, $4}'
+  echo
+
+  echo "${BOLD}Largest folders in Home (top 10, depth 2):${RESET}"
+  # du may hit protected dirs; never crash the script
+  { du -x -k -d 2 "$HOME" 2>/dev/null || true; } \
+    | sort -nr | head -n 10 \
+    | awk '{printf "  %8.1f GB    %s\n", $1/1024/1024, $2}'
+  echo
+}
+
+# -----------------------------------------------------------------------------
+# Determine cache locations robustly
+# -----------------------------------------------------------------------------
+npm_cache_dir() {
+  if have npm; then
+    (npm config get cache 2>/dev/null || true) | head -n 1
+  fi
+}
+pnpm_store_dir() {
+  if have pnpm; then
+    (pnpm store path 2>/dev/null || true) | head -n 1
+  fi
+}
+pip_cache_dir() {
+  if have python3; then
+    (python3 -m pip cache dir 2>/dev/null || true) | head -n 1
+  fi
+}
+brew_cache_dir() {
+  if have brew; then
+    (brew --cache 2>/dev/null || true) | head -n 1
+  fi
+}
+
+# -----------------------------------------------------------------------------
+# Cleanup tasks (all safe-by-design; opt-in)
+# -----------------------------------------------------------------------------
+task_npm() {
+  local c; c="$(npm_cache_dir)"
+  if [[ -n "$c" ]]; then
+    do_cmd "npm cache clean --force" npm cache clean --force
+    do_rm_rf "$HOME/.npm/_cacache"
+    do_rm_rf "$HOME/.npm/_npx"
+  else
+    log_line "npm not found → skip"
+  fi
+}
+
+task_pnpm() {
+  if have pnpm; then
+    do_cmd "pnpm store prune" pnpm store prune
+  else
+    log_line "pnpm not found → skip"
+  fi
+}
+
+task_pip() {
+  if have python3; then
+    do_cmd "python3 -m pip cache purge" python3 -m pip cache purge
+  else
+    log_line "python3 not found → skip"
+  fi
+}
+
+task_hf() {
+  # HF cache is typically here; allow override via HF_HOME but keep it simple and safe
+  local p="${HF_HOME:-$HOME/.cache}/huggingface"
+  do_rm_rf "$p"
+}
+
+task_user_cache() {
+  local d="$HOME/.cache"
+  [[ -d "$d" ]] || { log_line "~/.cache not found → skip"; return 0; }
+
+  log_line "Clean ~/.cache (excluding ollama + huggingface)"
+  shopt -s dotglob nullglob
+  for p in "$d"/*; do
+    local base; base="$(basename "$p")"
+    case "$base" in
+      ollama|huggingface) log_line "Skip protected cache: $p"; continue ;;
+    esac
+    do_rm_rf "$p"
+  done
+  shopt -u dotglob nullglob
+}
+
+task_mac_caches() {
+  local d="$HOME/Library/Caches"
+  [[ -d "$d" ]] || { log_line "~/Library/Caches not found → skip"; return 0; }
+
+  log_line "Clean ~/Library/Caches (best-effort; skip Apple protected + browsers)"
+  shopt -s dotglob nullglob
+  for p in "$d"/*; do
+    local base; base="$(basename "$p")"
+    case "$base" in
+      com.apple.*|CloudKit|FamilyCircle) log_line "Skip protected: $p"; continue ;;
+      com.apple.Safari|com.google.Chrome|com.google.Chrome.helper*|com.openai.atlas) log_line "Skip browser/session cache: $p"; continue ;;
+    esac
+    do_rm_rf "$p"
+  done
+  shopt -u dotglob nullglob
+}
+
+task_homebrew_cache() {
+  local c; c="$(brew_cache_dir)"
+  if [[ -n "$c" && -d "$c" ]]; then
+    # Clear contents, keep dir
+    shopt -s dotglob nullglob
+    for p in "$c"/*; do
+      do_rm_rf "$p"
+    done
+    shopt -u dotglob nullglob
+  else
+    log_line "brew not found → skip"
+  fi
+}
+
+task_xcode_derived() {
+  do_rm_rf "$HOME/Library/Developer/Xcode/DerivedData"
+}
+
+task_ios_sim() {
+  do_rm_rf "$HOME/Library/Developer/CoreSimulator"
+}
+
+task_trash() {
+  # Empty Trash = permanent. Delete contents, not the folder itself.
+  local d="$HOME/.Trash"
+  [[ -d "$d" ]] || { log_line "~/.Trash not found → skip"; return 0; }
+
+  shopt -s dotglob nullglob
+  for p in "$d"/*; do
+    do_rm_rf "$p"
+  done
+  shopt -u dotglob nullglob
+}
+
+# Project junk scanning
+JUNK_DIR_NAMES=(
+  "node_modules"
+  ".next"
+  "dist"
+  "build"
+  ".turbo"
+  ".cache"
+  "coverage"
+  "__pycache__"
+  ".pytest_cache"
+  ".mypy_cache"
+  ".ruff_cache"
+  ".vite"
+  ".parcel-cache"
+  ".pnpm-store"
+)
+VENV_DIR_NAMES=(
+  ".venv"
+  "venv"
+  ".tox"
+)
+
+find_in_roots() {
+  local roots_str="$1"
+  shift
+  local -a names=("$@")
+  local IFS=":"
+  for r in $roots_str; do
+    [[ -d "$r" ]] || continue
+    # For each pattern, find directories and prune
+    for n in "${names[@]}"; do
+      # Never let find errors kill the script
+      (find "$r" -type d -name "$n" -prune 2>/dev/null || true)
+    done
+  done | sort -u
+}
+
+sum_kb_of_paths() {
+  local total=0
+  while IFS= read -r p; do
+    total=$(( total + $(du_kb "$p") ))
+  done
+  echo "$total"
+}
+
+task_project_junk() {
+  log_line "Scan roots: $PROJECT_ROOTS"
+  while IFS= read -r p; do
+    do_rm_rf "$p"
+  done < <(find_in_roots "$PROJECT_ROOTS" "${JUNK_DIR_NAMES[@]}")
+}
+
+task_venvs() {
+  log_line "Scan roots: $PROJECT_ROOTS"
+  while IFS= read -r p; do
+    do_rm_rf "$p"
+  done < <(find_in_roots "$PROJECT_ROOTS" "${VENV_DIR_NAMES[@]}")
+}
+
+# -----------------------------------------------------------------------------
+# Config IO
+# -----------------------------------------------------------------------------
+print_config() {
+  cat <<CFG
+# mac-maid config (${VERSION})
+# Save as: ${CONF_PATH}
+#
+# 0=off, 1=on
+#
+# Safety:
+# - Never deletes ~/.ollama or ~/.cache/ollama
+# - Avoids ~/.config, ~/.ssh, and major macOS support dirs
+
+LOG_DIR="${LOG_DIR}"
+NOTIFY_ON_COMPLETE=${NOTIFY_ON_COMPLETE}
+SHOW_LOGIN_SUMMARY=${SHOW_LOGIN_SUMMARY}
+
+CLEAN_NPM=${CLEAN_NPM}
+CLEAN_PNPM=${CLEAN_PNPM}
+CLEAN_PIP=${CLEAN_PIP}
+CLEAN_HF=${CLEAN_HF}
+CLEAN_USER_CACHE=${CLEAN_USER_CACHE}
+CLEAN_MAC_CACHES=${CLEAN_MAC_CACHES}
+CLEAN_HOMEBREW_CACHE=${CLEAN_HOMEBREW_CACHE}
+CLEAN_XCODE_DERIVED=${CLEAN_XCODE_DERIVED}
+CLEAN_IOS_SIM=${CLEAN_IOS_SIM}
+CLEAN_TRASH=${CLEAN_TRASH}
+CLEAN_PROJECT_JUNK=${CLEAN_PROJECT_JUNK}
+CLEAN_VENVS=${CLEAN_VENVS}
+
+PROJECT_ROOTS="${PROJECT_ROOTS}"
+
+SCHEDULE_ENABLED=${SCHEDULE_ENABLED}
+SCHEDULE_MODE="${SCHEDULE_MODE}"        # daily|weekly|monthly
+SCHEDULE_TIME="${SCHEDULE_TIME}"        # HH:MM (24-hour)
+SCHEDULE_WEEKDAY="${SCHEDULE_WEEKDAY}"  # 1=Sun..7=Sat (weekly only)
+SCHEDULE_MONTHDAY="${SCHEDULE_MONTHDAY}"# 1..28 recommended (monthly only)
+
+ALLOW_WAKE=${ALLOW_WAKE}
+WAKE_TIME="${WAKE_TIME}"                # HH:MM:SS
+SLEEP_TIME="${SLEEP_TIME}"              # HH:MM:SS
+CFG
+}
+
+write_config() {
+  safe_mkdir "$(dirname "$CONF_PATH")"
+  print_config > "$CONF_PATH"
+}
+
+load_config() {
+  # shellcheck disable=SC1090
+  source "$CONF_PATH"
+  # If config didn't set LOG_DIR, keep default
+  LOG_DIR="${LOG_DIR:-$LOG_DIR_DEFAULT}"
+}
+
+# -----------------------------------------------------------------------------
+# LaunchAgent scheduling
+# -----------------------------------------------------------------------------
+launchagent_interval_xml() {
+  # Outputs XML dict for StartCalendarInterval
+  local hour="${SCHEDULE_TIME%:*}"
+  local minute="${SCHEDULE_TIME#*:}"
+
+  case "$SCHEDULE_MODE" in
+    daily)
+      cat <<XML
+<dict>
+  <key>Hour</key><integer>${hour}</integer>
+  <key>Minute</key><integer>${minute}</integer>
+</dict>
+XML
+      ;;
+    weekly)
+      cat <<XML
+<dict>
+  <key>Weekday</key><integer>${SCHEDULE_WEEKDAY}</integer>
+  <key>Hour</key><integer>${hour}</integer>
+  <key>Minute</key><integer>${minute}</integer>
+</dict>
+XML
+      ;;
+    monthly)
+      cat <<XML
+<dict>
+  <key>Day</key><integer>${SCHEDULE_MONTHDAY}</integer>
+  <key>Hour</key><integer>${hour}</integer>
+  <key>Minute</key><integer>${minute}</integer>
+</dict>
+XML
+      ;;
+  esac
+}
+
+install_launchagent() {
+  safe_mkdir "$HOME/Library/LaunchAgents"
+  safe_mkdir "$LOG_DIR"
+
+  local interval; interval="$(launchagent_interval_xml)"
+  local wake_xml=""
+  if [[ "$ALLOW_WAKE" == "1" ]]; then
+    wake_xml="    <key>WakeSystem</key><true/>"
+  fi
+
+  if [[ "$DRY_RUN" == "1" ]]; then
+    title "mac-maid — LaunchAgent Preview (dry-run)"
+    note "Dry-run: not writing plist and not calling launchctl."
+    echo
+    cat <<PLIST
+${interval}
+
+(Full plist would be written to: ${LA_PLIST})
+ProgramArguments:
+  ${SCRIPT_PATH} --run --config ${CONF_PATH}
+PLIST
+    echo
+    return 0
+  fi
+
+  cat > "$LA_PLIST" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+ "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <dict>
+    <key>Label</key><string>${LA_LABEL}</string>
+    <key>ProgramArguments</key>
+    <array>
+      <string>${SCRIPT_PATH}</string>
+      <string>--run</string>
+      <string>--config</string>
+      <string>${CONF_PATH}</string>
+    </array>
+
+    <key>StartCalendarInterval</key>
+    ${interval}
+${wake_xml}
+    <key>StandardOutPath</key><string>${LOG_DIR}/launchd.out</string>
+    <key>StandardErrorPath</key><string>${LOG_DIR}/launchd.err</string>
+  </dict>
+</plist>
+PLIST
+
+  local uid; uid="$(id -u)"
+  launchctl bootout "gui/${uid}" "$LA_PLIST" >/dev/null 2>&1 || true
+  launchctl bootstrap "gui/${uid}" "$LA_PLIST" >/dev/null 2>&1 || true
+
+  ok "Scheduled LaunchAgent: ${LA_PLIST}"
+  note "Tip: Scheduling is most reliable after installing to ~/.local/bin (so SCRIPT_PATH doesn’t move)."
+}
+
+remove_launchagent() {
+  local uid; uid="$(id -u)"
+  if [[ -f "$LA_PLIST" ]]; then
+    launchctl bootout "gui/${uid}" "$LA_PLIST" >/dev/null 2>&1 || true
+    rm -f "$LA_PLIST" >/dev/null 2>&1 || true
+  fi
+}
+
+# Optional wake/sleep schedule (best effort)
+apply_pmset_wake() {
+  [[ "$ALLOW_WAKE" == "1" ]] || return 0
+  if [[ "$DRY_RUN" == "1" ]]; then
+    warn "Dry-run: would set pmset repeating wake/sleep (requires sudo):"
+    echo "  sudo pmset repeat wakeorpoweron MTWRFSU ${WAKE_TIME} sleep MTWRFSU ${SLEEP_TIME}"
+    return 0
+  fi
+  warn "This will ask for your admin password once (pmset wake/sleep schedule)."
+  sudo pmset repeat wakeorpoweron MTWRFSU "$WAKE_TIME" sleep MTWRFSU "$SLEEP_TIME" >/dev/null 2>&1 || true
+  ok "pmset schedule applied. Check: pmset -g sched"
+}
+
+# -----------------------------------------------------------------------------
+# TUI (arrow-key menus)
+# -----------------------------------------------------------------------------
+TUI_OK=0
+if [[ -t 0 && -t 1 ]]; then TUI_OK=1; fi
+
+tui_hide_cursor() { tput civis 2>/dev/null || true; }
+tui_show_cursor() { tput cnorm 2>/dev/null || true; }
+tui_clear() { printf "\033[2J\033[H"; }
+
+tui_read_key() {
+  # returns key in global KEY
+  local k
+  IFS= read -rsn1 k || true
+  if [[ "$k" == $'\x1b' ]]; then
+    # Escape sequence
+    local k2 k3
+    IFS= read -rsn1 k2 || true
+    IFS= read -rsn1 k3 || true
+    KEY="${k}${k2}${k3}"
+  else
+    KEY="$k"
+  fi
+}
+
+tui_menu_single() {
+  # Args: title, prompt, default_index, options...
+  local menu_title="$1"; shift
+  local menu_prompt="$1"; shift
+  local idx_default="$1"; shift
+  local -a opts=("$@")
+  local idx="$idx_default"
+  local n="${#opts[@]}"
+
+  while :; do
+    tui_clear
+    title "$menu_title"
+    echo "$menu_prompt"
+    echo
+    for i in "${!opts[@]}"; do
+      if [[ "$i" -eq "$idx" ]]; then
+        printf "  ${BOLD}➤ %s${RESET}\n" "${opts[$i]}"
+      else
+        printf "    %s\n" "${opts[$i]}"
+      fi
+    done
+    echo
+    note "Use ↑/↓ to move, Enter to select. (Esc to cancel)"
+
+    tui_read_key
+    case "$KEY" in
+      $'\x1b[A') ((idx--)); [[ "$idx" -lt 0 ]] && idx=$((n-1)) ;;
+      $'\x1b[B') ((idx++)); [[ "$idx" -ge "$n" ]] && idx=0 ;;
+      "") echo "$idx"; return 0 ;;           # Enter
+      $'\x1b') echo "-1"; return 0 ;;        # Esc
+      "k") ((idx--)); [[ "$idx" -lt 0 ]] && idx=$((n-1)) ;;
+      "j") ((idx++)); [[ "$idx" -ge "$n" ]] && idx=0 ;;
+    esac
+  done
+}
+
+tui_menu_multi() {
+  # Args: title, prompt, options... (global array SELECTED must exist)
+  local menu_title="$1"; shift
+  local menu_prompt="$1"; shift
+  local -a opts=("$@")
+  local idx=0
+  local n="${#opts[@]}"
+
+  while :; do
+    tui_clear
+    title "$menu_title"
+    echo "$menu_prompt"
+    echo
+    for i in "${!opts[@]}"; do
+      local mark="[ ]"
+      [[ "${SELECTED[$i]}" == "1" ]] && mark="[x]"
+      if [[ "$i" -eq "$idx" ]]; then
+        printf "  ${BOLD}➤ %s %s${RESET}\n" "$mark" "${opts[$i]}"
+      else
+        printf "    %s %s\n" "$mark" "${opts[$i]}"
+      fi
+    done
+    echo
+    note "↑/↓ move • Space toggle • Enter continue • Esc cancel"
+
+    tui_read_key
+    case "$KEY" in
+      $'\x1b[A') ((idx--)); [[ "$idx" -lt 0 ]] && idx=$((n-1)) ;;
+      $'\x1b[B') ((idx++)); [[ "$idx" -ge "$n" ]] && idx=0 ;;
+      " ") SELECTED[$idx]=$(( 1 - ${SELECTED[$idx]:-0} )) ;;
+      "") return 0 ;;
+      $'\x1b') return 1 ;;
+      "k") ((idx--)); [[ "$idx" -lt 0 ]] && idx=$((n-1)) ;;
+      "j") ((idx++)); [[ "$idx" -ge "$n" ]] && idx=0 ;;
+    esac
+  done
+}
+
+prompt_line() {
+  # Args: prompt, default
+  local msg="$1" def="${2:-}" ans=""
+  if [[ "$YES" == "1" ]]; then
+    echo "$def"
+    return 0
+  fi
+  if [[ -n "$def" ]]; then
+    read -r -p "$msg [$def]: " ans
+    echo "${ans:-$def}"
+  else
+    read -r -p "$msg: " ans
+    echo "$ans"
+  fi
+}
+
+# -----------------------------------------------------------------------------
+# Wizard selections: compute sizes and present a checklist
+# -----------------------------------------------------------------------------
+spin_capture() {
+  # Usage: spin_capture "Message..." command args...
+  # Prints an animated spinner to stderr while the command runs.
+  # Writes command stdout to stdout (so callers can capture output).
+  local msg="$1"; shift
+  local tmp
+  tmp="$(mktemp -t macmaid.XXXXXX 2>/dev/null || mktemp 2>/dev/null || echo "")"
+
+  if [[ -z "$tmp" ]]; then
+    # Fallback: no temp file; just run directly.
+    "$@" 2>/dev/null || true
+    return 0
+  fi
+
+  # Start command in background
+  "$@" >"$tmp" 2>/dev/null &
+  local pid="$!"
+
+  if [[ -t 2 ]]; then
+    local spin='-\|/'
+    local i=0
+    printf "%s " "${GR}${msg}${RESET}" >&2
+    printf "%s" "${spin:0:1}" >&2
+    while kill -0 "$pid" 2>/dev/null; do
+      i=$(( (i + 1) % 4 ))
+      printf "\b%s" "${spin:$i:1}" >&2
+      sleep 0.10
+    done
+    wait "$pid" >/dev/null 2>&1 || true
+    printf "\b${G}✓${RESET}\n" >&2
+  else
+    wait "$pid" >/dev/null 2>&1 || true
+  fi
+
+  cat "$tmp" 2>/dev/null || true
+  rm -f "$tmp" >/dev/null 2>&1 || true
+}
+
+spin_du_kb() {
+  # Args: label, path  → echoes KB
+  local label="$1" path="$2"
+  [[ -e "$path" ]] || { echo 0; return 0; }
+
+  local out
+  if [[ -t 2 ]]; then
+    out="$(spin_capture "$label" du -sk -x "$path" || true)"
+  else
+    out="$(du -sk -x "$path" 2>/dev/null || true)"
+  fi
+  echo "$out" | awk 'NR==1{print $1+0}' || echo 0
+}
+
+compute_sizes() {
+  NPM_KB=0; PNPM_KB=0; PIP_KB=0; HF_KB=0; OL_KB=0
+  UC_TOTAL_KB=0; UC_SAFE_KB=0
+  MC_KB=0; HB_KB=0; XD_KB=0; SIM_KB=0; TR_KB=0
+
+  local p
+
+  p="$(npm_cache_dir || true)"
+  [[ -n "$p" ]] && NPM_KB="$(spin_du_kb "Estimating NPM cache size…" "$p")"
+
+  p="$(pnpm_store_dir || true)"
+  [[ -n "$p" ]] && PNPM_KB="$(spin_du_kb "Estimating PNPM store size…" "$p")"
+
+  p="$(pip_cache_dir || true)"
+  [[ -n "$p" ]] && PIP_KB="$(spin_du_kb "Estimating PIP cache size…" "$p")"
+
+  p="${HF_HOME:-$HOME/.cache}/huggingface"
+  HF_KB="$(spin_du_kb "Estimating Hugging Face cache size…" "$p")"
+
+  p="$HOME/.cache/ollama"
+  OL_KB="$(spin_du_kb "Checking Ollama cache (protected)…" "$p")"
+
+  UC_TOTAL_KB="$(spin_du_kb "Estimating ~/.cache total…" "$HOME/.cache")"
+  # We *never* delete Ollama + Hugging Face from ~/.cache via the generic toggle.
+  UC_SAFE_KB=$(( UC_TOTAL_KB - HF_KB - OL_KB ))
+  (( UC_SAFE_KB < 0 )) && UC_SAFE_KB=0
+
+  MC_KB="$(spin_du_kb "Estimating ~/Library/Caches total…" "$HOME/Library/Caches")"
+
+  p="$(brew_cache_dir || true)"
+  [[ -n "$p" ]] && HB_KB="$(spin_du_kb "Estimating Homebrew cache size…" "$p")"
+
+  XD_KB="$(spin_du_kb "Estimating Xcode DerivedData size…" "$HOME/Library/Developer/Xcode/DerivedData")"
+  SIM_KB="$(spin_du_kb "Estimating iOS Simulator data size…" "$HOME/Library/Developer/CoreSimulator")"
+
+  if [[ -d "$HOME/.Trash" ]]; then
+    TR_KB="$(spin_du_kb "Estimating Trash size…" "$HOME/.Trash")"
+  else
+    TR_KB=0
+  fi
+}
+
+wizard_apply_selected() {
+  # Map selected array -> toggles
+  CLEAN_NPM="${SELECTED[0]:-0}"
+  CLEAN_PNPM="${SELECTED[1]:-0}"
+  CLEAN_PIP="${SELECTED[2]:-0}"
+  CLEAN_HF="${SELECTED[3]:-0}"
+  CLEAN_USER_CACHE="${SELECTED[4]:-0}"
+  CLEAN_MAC_CACHES="${SELECTED[5]:-0}"
+  CLEAN_HOMEBREW_CACHE="${SELECTED[6]:-0}"
+  CLEAN_XCODE_DERIVED="${SELECTED[7]:-0}"
+  CLEAN_IOS_SIM="${SELECTED[8]:-0}"
+  CLEAN_TRASH="${SELECTED[9]:-0}"
+  CLEAN_PROJECT_JUNK="${SELECTED[10]:-0}"
+  CLEAN_VENVS="${SELECTED[11]:-0}"
+}
+
+# -----------------------------------------------------------------------------
+# Scheduling wizard
+# -----------------------------------------------------------------------------
+valid_time_hhmm() {
+  [[ "$1" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]]
+}
+
+wizard_schedule() {
+  # Choose schedule mode
+  local idx
+  idx="$(tui_menu_single "mac-maid — Schedule" "Choose auto-run frequency:" 0 \
+        "No schedule (run manually)" "Daily" "Weekly" "Monthly")"
+  [[ "$idx" == "-1" ]] && return 1
+
+  case "$idx" in
+    0) SCHEDULE_ENABLED=0; return 0 ;;
+    1) SCHEDULE_ENABLED=1; SCHEDULE_MODE="daily" ;;
+    2) SCHEDULE_ENABLED=1; SCHEDULE_MODE="weekly" ;;
+    3) SCHEDULE_ENABLED=1; SCHEDULE_MODE="monthly" ;;
+  esac
+
+  # Time
+  local t
+  while :; do
+    tui_clear
+    title "mac-maid — Schedule"
+    echo "Enter run time (24-hour HH:MM)."
+    echo
+    t="$(prompt_line "Run time" "$SCHEDULE_TIME")"
+    if valid_time_hhmm "$t"; then
+      SCHEDULE_TIME="$t"
+      break
+    fi
+    warn "Invalid time. Example: 05:00 or 23:15"
+    sleep 1
+  done
+
+  if [[ "$SCHEDULE_MODE" == "weekly" ]]; then
+    local w
+    w="$(tui_menu_single "mac-maid — Schedule" "Choose weekday:" 1 \
+        "Sunday (1)" "Monday (2)" "Tuesday (3)" "Wednesday (4)" "Thursday (5)" "Friday (6)" "Saturday (7)")"
+    [[ "$w" == "-1" ]] && return 1
+    SCHEDULE_WEEKDAY="$((w+1))"
+  fi
+
+  if [[ "$SCHEDULE_MODE" == "monthly" ]]; then
+    local d
+    while :; do
+      tui_clear
+      title "mac-maid — Schedule"
+      echo "Choose day-of-month (1..28 recommended)."
+      echo
+      d="$(prompt_line "Day of month" "$SCHEDULE_MONTHDAY")"
+      if [[ "$d" =~ ^[0-9]+$ ]] && (( d>=1 && d<=28 )); then
+        SCHEDULE_MONTHDAY="$d"
+        break
+      fi
+      warn "Pick a number from 1 to 28."
+      sleep 1
+    done
+  fi
+
+  # Optional wake schedule
+  local widx
+  widx="$(tui_menu_single "mac-maid — Wake/Sleep" "Optional: wake/sleep so it can run while you're not using the Mac." 0 \
+        "No (recommended unless you really want it)" "Yes (requires admin password once; best plugged in)")"
+  [[ "$widx" == "-1" ]] && return 1
+  if [[ "$widx" == "1" ]]; then
+    ALLOW_WAKE=1
+    WAKE_TIME="04:58:00"
+    SLEEP_TIME="05:20:00"
+  else
+    ALLOW_WAKE=0
+  fi
+
+  return 0
+}
+
+# -----------------------------------------------------------------------------
+# Run cleanup (uses current toggles)
+# -----------------------------------------------------------------------------
+run_cleanup() {
+  local before_kb after_kb freed_kb freed_gb
+  before_kb="$(kb_available_root)"
+
+  if [[ "$DRY_RUN" == "0" ]]; then
+    [[ -z "${RUN_LOG}" ]] && log_init
+    log_section "Disk"
+    log_line "Before: $(df -h / | awk 'NR==2{printf "Used %s / %s | Available %s", $3, $2, $4}')"
+    log_section "Plan"
+    log_kv "CLEAN_NPM" "$CLEAN_NPM"
+    log_kv "CLEAN_PNPM" "$CLEAN_PNPM"
+    log_kv "CLEAN_PIP" "$CLEAN_PIP"
+    log_kv "CLEAN_HF" "$CLEAN_HF"
+    log_kv "CLEAN_USER_CACHE" "$CLEAN_USER_CACHE"
+    log_kv "CLEAN_MAC_CACHES" "$CLEAN_MAC_CACHES"
+    log_kv "CLEAN_HOMEBREW_CACHE" "$CLEAN_HOMEBREW_CACHE"
+    log_kv "CLEAN_XCODE_DERIVED" "$CLEAN_XCODE_DERIVED"
+    log_kv "CLEAN_IOS_SIM" "$CLEAN_IOS_SIM"
+    log_kv "CLEAN_TRASH" "$CLEAN_TRASH"
+    log_kv "CLEAN_PROJECT_JUNK" "$CLEAN_PROJECT_JUNK"
+    log_kv "CLEAN_VENVS" "$CLEAN_VENVS"
+    echo >> "$RUN_LOG"
+  fi
+
+  # Execute tasks
+  [[ "$CLEAN_NPM" == "1" ]] && { [[ "$DRY_RUN" == "0" ]] && log_section "NPM"; task_npm; }
+  [[ "$CLEAN_PNPM" == "1" ]] && { [[ "$DRY_RUN" == "0" ]] && log_section "PNPM"; task_pnpm; }
+  [[ "$CLEAN_PIP" == "1" ]] && { [[ "$DRY_RUN" == "0" ]] && log_section "PIP"; task_pip; }
+  [[ "$CLEAN_HF" == "1" ]] && { [[ "$DRY_RUN" == "0" ]] && log_section "HuggingFace"; task_hf; }
+  [[ "$CLEAN_USER_CACHE" == "1" ]] && { [[ "$DRY_RUN" == "0" ]] && log_section "~/.cache"; task_user_cache; }
+  [[ "$CLEAN_MAC_CACHES" == "1" ]] && { [[ "$DRY_RUN" == "0" ]] && log_section "~/Library/Caches"; task_mac_caches; }
+  [[ "$CLEAN_HOMEBREW_CACHE" == "1" ]] && { [[ "$DRY_RUN" == "0" ]] && log_section "Homebrew cache"; task_homebrew_cache; }
+  [[ "$CLEAN_XCODE_DERIVED" == "1" ]] && { [[ "$DRY_RUN" == "0" ]] && log_section "Xcode DerivedData"; task_xcode_derived; }
+  [[ "$CLEAN_IOS_SIM" == "1" ]] && { [[ "$DRY_RUN" == "0" ]] && log_section "iOS Simulator"; task_ios_sim; }
+  [[ "$CLEAN_TRASH" == "1" ]] && { [[ "$DRY_RUN" == "0" ]] && log_section "Trash"; task_trash; }
+  [[ "$CLEAN_PROJECT_JUNK" == "1" ]] && { [[ "$DRY_RUN" == "0" ]] && log_section "Project junk"; task_project_junk; }
+  [[ "$CLEAN_VENVS" == "1" ]] && { [[ "$DRY_RUN" == "0" ]] && log_section "Python venvs"; task_venvs; }
+
+  after_kb="$(kb_available_root)"
+  freed_kb=$(( after_kb - before_kb ))
+  (( freed_kb < 0 )) && freed_kb=0
+  freed_gb="$(kb_to_gb "$freed_kb")"
+
+  if [[ "$DRY_RUN" == "0" ]]; then
+    log_section "Disk"
+    log_line "After : $(df -h / | awk 'NR==2{printf "Used %s / %s | Available %s", $3, $2, $4}')"
+    log_line "Freed ~${freed_gb} GB (approx)"
+    echo >> "$RUN_LOG"
+  fi
+
+  if [[ "$DRY_RUN" == "1" ]]; then
+    ok "Dry-run plan complete. (No changes were made.)"
+  else
+    ok "Done. Freed ~${freed_gb} GB (approx)."
+    ok "Log: ${RUN_LOG}"
+    notify "Cleanup finished. Freed ~${freed_gb} GB."
+  fi
+}
+
+# -----------------------------------------------------------------------------
+# Status / install / uninstall
+# -----------------------------------------------------------------------------
+status() {
+  title "mac-maid — Status"
+  echo "Version: ${VERSION}"
+  echo "Script : ${SCRIPT_PATH}"
+  echo
+
+  echo "${BOLD}Disk:${RESET}"
+  df -h / | awk 'NR==1{print $0} NR==2{printf "  Used %s / %s | Available %s\n", $3, $2, $4}'
+  echo
+
+  echo "${BOLD}Config:${RESET}"
+  echo "  Path: ${CONF_PATH}"
+  if [[ -f "$CONF_PATH" ]]; then
+    echo "  Exists: yes"
+  else
+    echo "  Exists: no"
+  fi
+  echo
+
+  echo "${BOLD}Schedule:${RESET}"
+  if [[ -f "$LA_PLIST" ]]; then
+    echo "  LaunchAgent plist: present"
+  else
+    echo "  LaunchAgent plist: not installed"
+  fi
+  echo
+
+  echo "${BOLD}pmset (report only):${RESET}"
+  if have pmset; then
+    pmset -g sched 2>/dev/null || true
+  else
+    echo "  pmset not found"
+  fi
+  echo
+
+  echo "${BOLD}Logs:${RESET}"
+  echo "  Dir: ${LOG_DIR_DEFAULT}"
+  if [[ -d "$LOG_DIR_DEFAULT" ]]; then
+    local last
+    last="$(ls -t "$LOG_DIR_DEFAULT"/run-*.log 2>/dev/null | head -n 1 || true)"
+    if [[ -n "$last" ]]; then
+      echo "  Last: $last"
+    else
+      echo "  Last: (none)"
+    fi
+  else
+    echo "  (none)"
+  fi
+  echo
+}
+
+install_to_path() {
+  local target_dir="$HOME/.local/bin"
+  local target="$target_dir/mac-maid"
+  safe_mkdir "$target_dir"
+
+  if [[ "$DRY_RUN" == "1" ]]; then
+    title "mac-maid — Install Preview (dry-run)"
+    echo "Would copy:"
+    echo "  ${SCRIPT_PATH} -> ${target}"
+    echo
+    return 0
+  fi
+
+  cp "$SCRIPT_PATH" "$target"
+  chmod +x "$target" || true
+  ok "Installed to: $target"
+  note "If needed, add ~/.local/bin to PATH."
+}
+
+uninstall_all() {
+  # Remove schedule
+  remove_launchagent
+  ok "Removed LaunchAgent schedule (if present)."
+
+  # Remove PATH install
+  if [[ -f "$HOME/.local/bin/mac-maid" ]]; then
+    rm -f "$HOME/.local/bin/mac-maid" >/dev/null 2>&1 || true
+    ok "Removed: ~/.local/bin/mac-maid"
+  else
+    note "No ~/.local/bin/mac-maid found."
+  fi
+
+  if [[ "$PURGE" == "1" ]]; then
+    rm -f "$CONF_PATH_DEFAULT" >/dev/null 2>&1 || true
+    rm -rf "$STATE_DIR" >/dev/null 2>&1 || true
+    ok "Purged config + logs."
+  fi
+
+  note "If you previously enabled pmset wake/sleep, you may want to review it:"
+  note "  pmset -g sched"
+  note "(mac-maid does not auto-cancel pmset schedules because it can affect other schedules.)"
+}
+
+schedule_from_config() {
+  if [[ ! -f "$CONF_PATH" ]]; then
+    fail "Config not found: $CONF_PATH"
+    exit 1
+  fi
+  load_config
+  install_launchagent
+  apply_pmset_wake
+}
+
+unschedule() {
+  remove_launchagent
+  ok "Schedule removed."
+  note "pmset schedule (if any) remains. Check: pmset -g sched"
+}
+
+# -----------------------------------------------------------------------------
+# Wizard flow
+# -----------------------------------------------------------------------------
+wizard() {
+  trap 'tui_show_cursor' EXIT
+
+  # Snapshot prints to the terminal before the full-screen UI starts.
+  # Keep the cursor visible here so the screen doesn't look frozen.
+  tui_show_cursor
+  audit_snapshot
+  note "Estimating cache sizes for the checklist… (this can take a bit on large folders)"
+  note "Nothing is being deleted yet — this is just a preview to help you choose."
+  echo
+
+  compute_sizes
+  echo
+  ok "Estimates ready."
+  sleep 0.2
+
+  # Now start the full-screen UI.
+  tui_hide_cursor
+
+  # Start choice
+  local start_idx
+  start_idx="$(tui_menu_single "mac-maid — Wizard" "Choose what you want to do:" 0 \
+    "Run a one-time clean" "Set up auto-clean schedule" "View status" "Exit")"
+  [[ "$start_idx" == "-1" || "$start_idx" == "3" ]] && return 0
+  if [[ "$start_idx" == "2" ]]; then
+    tui_show_cursor
+    status
+    return 0
+  fi
+
+  if [[ "$start_idx" == "1" ]]; then
+    # schedule path
+    :
+  fi
+
+  # Preferences (minimal)
+  local pref_idx
+  pref_idx="$(tui_menu_single "mac-maid — Preferences" "Notifications:" 0 \
+    "Notify when finished (recommended)" "No notifications")"
+  [[ "$pref_idx" == "-1" ]] && return 0
+  NOTIFY_ON_COMPLETE=$([[ "$pref_idx" == "0" ]] && echo 1 || echo 0)
+
+  local login_idx
+  login_idx="$(tui_menu_single "mac-maid — Preferences" "At next login:" 0 \
+    "Do nothing" "Show a short 'last run' notification")"
+  [[ "$login_idx" == "-1" ]] && return 0
+  SHOW_LOGIN_SUMMARY=$([[ "$login_idx" == "1" ]] && echo 1 || echo 0)
+
+  # Main checklist (condensed)
+  SELECTED=(0 0 0 0 0 0 0 0 0 0 0 0)
+
+  # Sensible defaults:
+  # - NPM + PNPM on for devs
+  # - Homebrew cache off by default (but safe)
+  # - Library Caches off by default (can log out apps)
+  SELECTED[0]=1  # NPM
+  SELECTED[1]=1  # PNPM
+
+  local -a items=(
+    "NPM cache (≈ $(kb_to_gb "$NPM_KB") GB)"
+    "PNPM store prune (≈ $(kb_to_gb "$PNPM_KB") GB)"
+    "PIP cache (≈ $(kb_to_gb "$PIP_KB") GB)"
+    "Hugging Face cache (≈ $(kb_to_gb "$HF_KB") GB)"
+    "~/.cache (excluding Ollama + HF) (≈ $(kb_to_gb "$UC_SAFE_KB") GB)"
+    "~/Library/Caches (best-effort; may log out apps) (≈ $(kb_to_gb "$MC_KB") GB)"
+    "Homebrew cache (≈ $(kb_to_gb "$HB_KB") GB)"
+    "Xcode DerivedData (≈ $(kb_to_gb "$XD_KB") GB)"
+    "iOS Simulator data (≈ $(kb_to_gb "$SIM_KB") GB)"
+    "Empty Trash (≈ $(kb_to_gb "$TR_KB") GB)"
+    "Project junk (node_modules/.next/dist/build/...)"
+    "Python venvs (.venv/venv/.tox)"
+  )
+
+  local msg="Toggle what to clean. Safe-by-default. Ollama + configs are protected."
+  if ! tui_menu_multi "mac-maid — Select Cleanup" "$msg" "${items[@]}"; then
+    return 0
+  fi
+  wizard_apply_selected
+
+  # If project junk or venvs enabled, ask roots once
+  if [[ "$CLEAN_PROJECT_JUNK" == "1" || "$CLEAN_VENVS" == "1" ]]; then
+    tui_show_cursor
+    PROJECT_ROOTS="$(prompt_line "Project roots (colon-separated)" "$PROJECT_ROOTS")"
+    tui_hide_cursor
+
+    # Show scan estimate
+    local junk_kb=0 venv_kb=0
+    if [[ "$CLEAN_PROJECT_JUNK" == "1" ]]; then
+      junk_kb="$(find_in_roots "$PROJECT_ROOTS" "${JUNK_DIR_NAMES[@]}" | sum_kb_of_paths)"
+    fi
+    if [[ "$CLEAN_VENVS" == "1" ]]; then
+      venv_kb="$(find_in_roots "$PROJECT_ROOTS" "${VENV_DIR_NAMES[@]}" | sum_kb_of_paths)"
+    fi
+
+    tui_clear
+    title "mac-maid — Scan Preview"
+    [[ "$CLEAN_PROJECT_JUNK" == "1" ]] && echo "Project junk found: ~$(kb_to_gb "$junk_kb") GB"
+    [[ "$CLEAN_VENVS" == "1" ]] && echo "Venvs found       : ~$(kb_to_gb "$venv_kb") GB"
+    echo
+    note "This is a preview. Actual savings vary."
+    echo
+    note "Press Enter to continue."
+    tui_read_key || true
+  fi
+
+  # Scheduling decision
+  if [[ "$start_idx" == "1" ]]; then
+    # user chose schedule path at start
+    if ! wizard_schedule; then
+      return 0
+    fi
+  else
+    # one-time path: optionally offer schedule
+    local sidx
+    sidx="$(tui_menu_single "mac-maid — Schedule" "Also set up an automatic schedule?" 0 \
+      "No schedule" "Yes (daily/weekly/monthly)")"
+    [[ "$sidx" == "-1" ]] && return 0
+    if [[ "$sidx" == "1" ]]; then
+      if ! wizard_schedule; then
+        return 0
+      fi
+    else
+      SCHEDULE_ENABLED=0
+    fi
+  fi
+
+  # Config path
+  tui_show_cursor
+  CONF_PATH="$(prompt_line "Config path" "$CONF_PATH_DEFAULT")"
+  tui_hide_cursor
+
+  # Preview config + example log (always)
+  tui_clear
+  title "mac-maid — Preview"
+  echo "${BOLD}Config preview:${RESET}"
+  echo
+  print_config | sed 's/^/  /'
+  echo
+  echo "${BOLD}Example log format:${RESET}"
+  echo
+  cat <<'LOG' | sed 's/^/  /'
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+┃ mac-maid — Run Log (example)
+┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+┃ Started : 2026-01-12 05:00:01
+┃ Host    : My-Mac
+┃ User    : you
+┃ DryRun  : 1
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+━━ Plan
+ • [dry-run] Would remove: ~/.npm/_cacache (size: 2.3G)
+ • [dry-run] Would remove: ~/Library/Developer/Xcode/DerivedData (size: 1.1G)
+
+━━ Disk
+ • Freed ~0.00 GB (approx)
+LOG
+  echo
+
+  if [[ "$DRY_RUN" == "1" ]]; then
+    warn "Dry-run: no files will be written and no scheduling changes will be made."
+    echo
+    note "Press Enter to finish preview."
+    tui_read_key || true
+    ok "Dry-run preview complete. Re-run without --dry-run to apply changes."
+    return 0
+  fi
+
+  # Real run: save config, optionally schedule, run now
+  local aidx
+  aidx="$(tui_menu_single "mac-maid — Apply" "What next?" 0 \
+    "Save config + Run now" "Save config only" "Save config + Schedule + Run now" "Cancel")"
+  [[ "$aidx" == "-1" || "$aidx" == "3" ]] && return 0
+
+  # Always write config
+  write_config
+  ok "Config saved: $CONF_PATH"
+
+  # Scheduling if chosen
+  if [[ "$aidx" == "2" ]]; then
+    SCHEDULE_ENABLED=1
+    install_launchagent
+    apply_pmset_wake
+  fi
+
+  if [[ "$aidx" == "1" ]]; then
+    ok "Saved config only."
+    return 0
+  fi
+
+  # Run now
+  safe_mkdir "$LOG_DIR"
+  log_init
+  run_cleanup
+
+  # If user asked schedule but chose option 0, still offer schedule based on toggles
+  if [[ "$SCHEDULE_ENABLED" == "1" && "$aidx" != "2" ]]; then
+    install_launchagent
+    apply_pmset_wake
+  fi
+
+  ok "All done."
+}
+
+# -----------------------------------------------------------------------------
+# CLI
+# -----------------------------------------------------------------------------
+usage() {
+  cat <<HELP
+mac-maid ${VERSION}
+Usage:
+  ./mac-maid                   Run wizard (real)
+  ./mac-maid --dry-run          Wizard preview (no writes)
+  ./mac-maid --run --config P   Run using config (non-interactive)
+  ./mac-maid --install          Install to ~/.local/bin/mac-maid
+  ./mac-maid --status           Show status
+  ./mac-maid --schedule         Install schedule using config schedule fields
+  ./mac-maid --unschedule       Remove LaunchAgent schedule
+  ./mac-maid --uninstall [--purge] [--yes]
+HELP
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dry-run) DRY_RUN=1; shift ;;
+    --yes) YES=1; shift ;;
+    --config) CONF_PATH="$2"; shift 2 ;;
+    --run) MODE="run"; shift ;;
+    --install) MODE="install"; shift ;;
+    --status) MODE="status"; shift ;;
+    --schedule) MODE="schedule"; shift ;;
+    --unschedule) MODE="unschedule"; shift ;;
+    --uninstall) MODE="uninstall"; shift ;;
+    --purge) PURGE=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) fail "Unknown arg: $1"; usage; exit 1 ;;
+  esac
+done
+
+# -----------------------------------------------------------------------------
+# Main
+# -----------------------------------------------------------------------------
+case "$MODE" in
+  wizard)
+    if [[ "$TUI_OK" == "1" ]]; then
+      wizard
+    else
+      fail "Interactive mode requires a TTY. Run in Terminal."
+      exit 1
+    fi
+    ;;
+  run)
+    # Non-interactive run requires config
+    if [[ ! -f "$CONF_PATH" ]]; then
+      fail "Config not found: $CONF_PATH"
+      exit 1
+    fi
+    load_config
+    if [[ "$DRY_RUN" == "1" ]]; then
+      title "mac-maid — Non-interactive dry-run"
+      echo "Config: $CONF_PATH"
+      echo
+      print_config | sed 's/^/  /'
+      echo
+      ok "Dry-run: not executing. Use without --dry-run to run."
+      exit 0
+    fi
+    safe_mkdir "$LOG_DIR"
+    log_init
+    run_cleanup
+    ;;
+  install)
+    install_to_path
+    ;;
+  uninstall)
+    uninstall_all
+    ;;
+  status)
+    status
+    ;;
+  schedule)
+    schedule_from_config
+    ;;
+  unschedule)
+    unschedule
+    ;;
+esac

@@ -32,4 +32,4 @@ chmod +x mac-maid
 
 ./mac-maid --dry-run   # walk through wizard safely (no changes)
 ./mac-maid             # real run (writes config + runs cleanup)
-
+```

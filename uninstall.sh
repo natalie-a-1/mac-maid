@@ -4,6 +4,9 @@ IFS=$'\n\t'
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 SCRIPT="${HERE}/mac-maid"
+if [[ ! -f "$SCRIPT" ]]; then
+  SCRIPT="${HERE}/mac-maid.sh"
+fi
 
 PURGE=0
 YES=0
@@ -43,4 +46,3 @@ run_cmd() {
 }
 
 run_cmd
-
